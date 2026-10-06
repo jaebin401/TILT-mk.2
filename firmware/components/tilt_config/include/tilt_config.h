@@ -11,13 +11,14 @@ inline constexpr float DEG2RAD = 0.01745329251994329577f; // inline constexpr는
 inline constexpr float THIGH_LENGTH_MM = 68.0f; 
 inline constexpr float CALF_LENGTH_MM = 69.408f;
 inline constexpr float FOOT_LENGTH_MM = 7.0f;
-inline constexpr float Y_HIP_MM = 36.2f; 
+inline constexpr float Y_HIP_MM = 13.0f;             // 몸통 중심 → H (hip roll·pitch 축 교차점)
+inline constexpr float HIP_LEG_OFFSET_Y_MM = 41.875f; // H → 다리 중심면 (왼다리 +, 오른다리 −)
 
 // The ankle bracket keeps the foot at this fixed angle relative to the calf.
 inline constexpr float ANKLE_FIXED_RAD = -20.0f * DEG2RAD;
 
 // The knee bracket contributes this fixed mechanical offset to the calf.
-inline constexpr float KNEE_OFFSET_RAD = +20.0f * DEG2RAD;
+inline constexpr float KNEE_OFFSET_RAD = +0.0f * DEG2RAD;
 
 // mk.1에 있던 yaw 관절 전용 ik 파라미터. roll 에선 불필요
 inline constexpr float YAW_SINGULARITY_EPS_MM = 1.0f; // 얜 뭐지?
@@ -89,10 +90,10 @@ inline constexpr std::int8_t JOINT_SIGN[NUM_JOINTS] = {
 
 // zero pose.
 inline constexpr float ZERO_POSE_RAD[NUM_JOINTS] = {
-    0.0f * DEG2RAD, -20.0f * DEG2RAD, +20.0f * DEG2RAD,
-    0.0f * DEG2RAD, -20.0f * DEG2RAD, +20.0f * DEG2RAD,
+    0.0f * DEG2RAD, -20.0f * DEG2RAD, +40.0f * DEG2RAD,
+    0.0f * DEG2RAD, -20.0f * DEG2RAD, +40.0f * DEG2RAD,
 };
-inline constexpr float ZERO_POSE_HEIGHT_MM = 103.97f; // 이거 수정 필요할듯 맞지?
+inline constexpr float ZERO_POSE_HEIGHT_MM = 136.608f; // hip pitch 축 → 발바닥, zero pose CAD 실측
 
 // UART identifiers are integers here to avoid ESP headers in PC builds.
 inline constexpr int SERVO_UART_PORT = 1;
@@ -109,17 +110,17 @@ struct JointLimit {
 // Indexed as [Leg][Hip Roll, Hip Pitch, Knee Pitch]. These are provisional
 // software limits and remain separate from the raw-servo calibration table.
 
-// 각도 제한 재설정 필요
+// mk.2: roll은 실측 전 임시 ±10°. pitch/knee는 mk.1 실측값 — servo_tool `l`로 재측정 후 교체.
 inline constexpr JointLimit JOINT_LIMIT[2][3] = {
     {
-        {   -85.0f * DEG2RAD,   +95.0f * DEG2RAD },  // L_HIP_Roll
-        {   -75.0f * DEG2RAD,   +76.10f * DEG2RAD },  // L_HIP_PITCH
-        {   -85.0f * DEG2RAD,  +108.0f * DEG2RAD },  // L_KNEE_PITCH
+        {   -10.0f * DEG2RAD,   +10.0f * DEG2RAD },  // L_HIP_ROLL (임시)
+        {   -75.0f * DEG2RAD,   +76.10f * DEG2RAD },  // L_HIP_PITCH (mk.1)
+        {   -85.0f * DEG2RAD,  +108.0f * DEG2RAD },  // L_KNEE_PITCH (mk.1)
     },
     {
-        {   -85.0f * DEG2RAD,   +95.0f * DEG2RAD },  // R_HIP_Roll
-        {   -75.0f * DEG2RAD,   +76.10f * DEG2RAD },  // R_HIP_PITCH
-        {   -85.0f * DEG2RAD,  +108.0f * DEG2RAD },  // R_KNEE_PITCH
+        {   -10.0f * DEG2RAD,   +10.0f * DEG2RAD },  // R_HIP_ROLL (임시)
+        {   -75.0f * DEG2RAD,   +76.10f * DEG2RAD },  // R_HIP_PITCH (mk.1)
+        {   -85.0f * DEG2RAD,  +108.0f * DEG2RAD },  // R_KNEE_PITCH (mk.1)
     },
 };
 
