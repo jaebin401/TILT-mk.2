@@ -1,15 +1,17 @@
-#pragma once
+#pragma once  
+// 이건 뭐임?
+// 헤더가 중복 include 되는것을 방지
 
 #include <cstdint>
 
 namespace tilt {
 
-inline constexpr float DEG2RAD = 0.01745329251994329577f;
+inline constexpr float DEG2RAD = 0.01745329251994329577f; // inline constexpr는 뭐지?
 
-inline constexpr float THIGH_LENGTH_MM = 50.0f;
-inline constexpr float CALF_LENGTH_MM = 50.0f;
-inline constexpr float FOOT_LENGTH_MM = 10.0f;
-inline constexpr float Y_HIP_MM = 36.2f;
+inline constexpr float THIGH_LENGTH_MM = 68.0f; 
+inline constexpr float CALF_LENGTH_MM = 69.408f;
+inline constexpr float FOOT_LENGTH_MM = 7.0f;
+inline constexpr float Y_HIP_MM = 36.2f; 
 
 // The ankle bracket keeps the foot at this fixed angle relative to the calf.
 inline constexpr float ANKLE_FIXED_RAD = -20.0f * DEG2RAD;
@@ -17,7 +19,8 @@ inline constexpr float ANKLE_FIXED_RAD = -20.0f * DEG2RAD;
 // The knee bracket contributes this fixed mechanical offset to the calf.
 inline constexpr float KNEE_OFFSET_RAD = +20.0f * DEG2RAD;
 
-inline constexpr float YAW_SINGULARITY_EPS_MM = 1.0f;
+// mk.1에 있던 yaw 관절 전용 ik 파라미터. roll 에선 불필요
+inline constexpr float YAW_SINGULARITY_EPS_MM = 1.0f; // 얜 뭐지?
 
 inline constexpr int IMU_I2C_PORT = 0;
 inline constexpr int IMU_SDA_PIN = 8;
@@ -29,23 +32,33 @@ inline constexpr std::uint32_t IMU_SAMPLE_PERIOD_MS = 10;
 // ── Six-leg-joint / STS3215 configuration ────────────────────────────────
 // Keep these values free of ESP-IDF types: this header is also used by the
 // host-side kinematics tests. ZERO_TICK and JOINT_SIGN are deliberate
-// placeholders until measured with tools/servo_tool.
+// placeholders until measured with tools/servo_tool_UART.
 inline constexpr int NUM_JOINTS = 6;
 
+// servo ID
+// | ID |      joint       |
+// | 11 | Left Hip Roll    |
+// | 12 | Left Hip Pitch   |
+// | 13 | Left Knee Pitch  |
+// | 21 | Right Hip Roll   |
+// | 22 | Right Hip Pitch  |
+// | 23 | Right Knee Pitch |
+
 enum JointIndex : int {
-    L_HIP_YAW = 0,
+    L_HIP_ROLL = 0,
     L_HIP_PITCH = 1,
     L_KNEE_PITCH = 2,
-    R_HIP_YAW = 3,
+    R_HIP_ROLL = 3,
     R_HIP_PITCH = 4,
     R_KNEE_PITCH = 5,
 };
 
 inline constexpr std::uint8_t SERVO_ID[NUM_JOINTS] = {11, 12, 13, 21, 22, 23};
 inline constexpr const char* JOINT_NAME[NUM_JOINTS] = {
-    "LHY", "LHP", "LKP", "RHY", "RHP", "RKP",
+    "LHR", "LHP", "LKP", "RHR", "RHP", "RKP",
 };
 
+// 여기서 inline constexpr 
 inline constexpr int SERVO_TICKS_PER_REV = 4096;
 inline constexpr int SERVO_POS_MIN = 0;
 inline constexpr int SERVO_POS_MAX = 4095;
@@ -54,46 +67,57 @@ inline constexpr float RAD_PER_TICK = 6.28318530718f / SERVO_TICKS_PER_REV;
 
 // TODO: Measure and replace all six calibration values with tools/servo_tool.
 inline constexpr std::uint16_t ZERO_TICK[NUM_JOINTS] = {
-    2117,  // L_HIP_YAW
-    2027,  // L_HIP_PITCH
-    2073,  // L_KNEE_PITCH
-    2024,  // R_HIP_YAW
-    2075,  // R_HIP_PITCH
-    2020,  // R_KNEE_PITCH
-};
-inline constexpr std::int8_t JOINT_SIGN[NUM_JOINTS] = {
-    +1, +1, +1, +1, +1, +1,
+    2048,  // L_HIP_ROLL
+    2048,  // L_HIP_PITCH
+    2048,  // L_KNEE_PITCH
+    2048,  // R_HIP_ROLL
+    2048,  // R_HIP_PITCH
+    2048,  // R_KNEE_PITCH
 };
 
-// ADR-008 zero pose.
+// raw tick 증가 방향이 관절 + 방향과 같으면 +1.
+// + 방향(로봇 시선, 오른손 규칙, 좌우 공통):
+//   Hip Roll  = 발이 로봇의 왼쪽(+y)으로 (왼다리=벌림, 오른다리=모음)
+//   Hip Pitch = 다리가 뒤로 스윙
+//   Knee Pitch = 무릎이 굽음
+// 아래 값은 예측값 — servo_tool `s` 부호 판별로 확정할 것.
+
+inline constexpr std::int8_t JOINT_SIGN[NUM_JOINTS] = {
+    +1, +1, +1,   // L: HR, HP, KP
+    -1, -1, -1,   // R: HR, HP, KP
+};
+
+// zero pose.
 inline constexpr float ZERO_POSE_RAD[NUM_JOINTS] = {
     0.0f * DEG2RAD, -20.0f * DEG2RAD, +20.0f * DEG2RAD,
     0.0f * DEG2RAD, -20.0f * DEG2RAD, +20.0f * DEG2RAD,
 };
-inline constexpr float ZERO_POSE_HEIGHT_MM = 103.97f;
+inline constexpr float ZERO_POSE_HEIGHT_MM = 103.97f; // 이거 수정 필요할듯 맞지?
 
 // UART identifiers are integers here to avoid ESP headers in PC builds.
 inline constexpr int SERVO_UART_PORT = 1;
 inline constexpr int SERVO_UART_TX_PIN = 17;
 inline constexpr int SERVO_UART_RX_PIN = 18;
 inline constexpr std::uint32_t SERVO_UART_BAUD = 1'000'000;
-inline constexpr std::uint32_t CONTROL_PERIOD_MS = 30;
+inline constexpr std::uint32_t CONTROL_PERIOD_MS = 10; 
 
 struct JointLimit {
     float minimum_rad;
     float maximum_rad;
 };
 
-// Indexed as [Leg][Hip Yaw, Hip Pitch, Knee Pitch]. These are provisional
+// Indexed as [Leg][Hip Roll, Hip Pitch, Knee Pitch]. These are provisional
 // software limits and remain separate from the raw-servo calibration table.
+
+// 각도 제한 재설정 필요
 inline constexpr JointLimit JOINT_LIMIT[2][3] = {
     {
-        {   -85.0f * DEG2RAD,   +95.0f * DEG2RAD },  // L_HIP_YAW
+        {   -85.0f * DEG2RAD,   +95.0f * DEG2RAD },  // L_HIP_Roll
         {   -75.0f * DEG2RAD,   +76.10f * DEG2RAD },  // L_HIP_PITCH
         {   -85.0f * DEG2RAD,  +108.0f * DEG2RAD },  // L_KNEE_PITCH
     },
     {
-        {   -85.0f * DEG2RAD,   +95.0f * DEG2RAD },  // R_HIP_YAW
+        {   -85.0f * DEG2RAD,   +95.0f * DEG2RAD },  // R_HIP_Roll
         {   -75.0f * DEG2RAD,   +76.10f * DEG2RAD },  // R_HIP_PITCH
         {   -85.0f * DEG2RAD,  +108.0f * DEG2RAD },  // R_KNEE_PITCH
     },
