@@ -59,13 +59,28 @@ static void servo_write_tick(uint8_t id, uint16_t tick, uint16_t speed) {
     bus().writePosition(id, tick, speed);
 }
 
-static void servo_torque(uint8_t id, bool on) {
-    bus().setTorque(id, on);
+static bool servo_torque(uint8_t id, bool on) {
+    return bus().setTorque(id, on) == ESP_OK;
 }
 
 static void servo_set_baud(uint32_t baud) {
     bus().setBaudRate(baud);
 }
+
+static bool servo_read_byte(uint8_t id, uint8_t address, uint8_t* value) {
+    return value != nullptr && bus().readRegister(id, address, value, 1) == ESP_OK;
+}
+
+static bool servo_write_byte(uint8_t id, uint8_t address, uint8_t value) {
+    return bus().writeRegister(id, address, &value, 1) == ESP_OK;
+}
+
+static constexpr uint8_t STS3215_ID_ADDRESS = 5;
+static constexpr uint8_t STS3215_EEPROM_LOCK_ADDRESS = 55;
+static constexpr uint8_t STS3215_EEPROM_UNLOCKED = 0;
+static constexpr uint8_t STS3215_EEPROM_LOCKED = 1;
+static constexpr uint8_t SERVO_ID_MIN = 0;
+static constexpr uint8_t SERVO_ID_MAX = 253;
 
 static const char *NVS_NAMESPACE = "tilt_cal";
 static const char *NVS_KEY_ZERO  = "zero_tick";
@@ -266,6 +281,58 @@ static int read_key_timeout(int ms) {
     return (n > 0) ? ch : -1;
 }
 
+// USB Serial/JTAG monitor is character based, so read and echo a small decimal
+// line instead of relying on scanf buffering. Returns false when cancelled.
+static bool read_servo_id(const char* label, uint8_t* out_id) {
+    if (out_id == nullptr) return false;
+
+    while (true) {
+        printf("  %s (0~253, x=취소): ", label);
+        fflush(stdout);
+
+        int value = 0;
+        int digits = 0;
+        while (true) {
+            const int c = read_key_blocking();
+
+            if (c == ' ' && digits == 0) {
+                emergency_stop();
+                return false;
+            }
+            if ((c == 'x' || c == 'X') && digits == 0) {
+                printf("x\n");
+                return false;
+            }
+            if ((c == '\b' || c == 0x7f) && digits > 0) {
+                value /= 10;
+                --digits;
+                printf("\b \b");
+                fflush(stdout);
+                continue;
+            }
+            if (c >= '0' && c <= '9' && digits < 3) {
+                value = value * 10 + (c - '0');
+                ++digits;
+                putchar(c);
+                fflush(stdout);
+                continue;
+            }
+            if (c == '\r' || c == '\n') {
+                // Some monitors send CRLF. Ignore the leftover terminator at
+                // the beginning of the next prompt.
+                if (digits == 0) continue;
+                printf("\n");
+                if (value >= SERVO_ID_MIN && value <= SERVO_ID_MAX) {
+                    *out_id = static_cast<uint8_t>(value);
+                    return true;
+                }
+                printf("  잘못된 ID입니다. 0~253 범위로 다시 입력하세요.\n");
+                break;
+            }
+        }
+    }
+}
+
 // ── 툴 1: ID 스캔 ────────────────────────────────────────────────────
 static void tool_scan_ids() {
     printf("\n=== ID 스캔 (0~253) ===\n");
@@ -283,7 +350,115 @@ static void tool_scan_ids() {
     }
 }
 
-// ── 툴 2: 보레이트 스캔 ──────────────────────────────────────────────
+// ── 툴 2: ID 변경 ───────────────────────────────────────────────────
+// STS3215 ID is EEPROM-backed. Keep this sequence aligned with the host-side
+// tools/servo_setup implementation: torque off -> unlock -> write -> re-lock.
+// Returns true once torque has been disabled, so the menu can track that state.
+static bool tool_change_id() {
+    printf("\n=== 서보 ID 변경 ===\n");
+    printf("  반드시 대상 STS3215 한 개만 버스에 연결하세요.\n");
+    printf("  같은 현재 ID를 가진 서보가 여러 개면 모두 함께 변경됩니다.\n");
+    printf("  변경 중에는 서보 전원을 끄거나 케이블을 분리하지 마세요.\n\n");
+
+    uint8_t current_id = 0;
+    uint8_t new_id = 0;
+    if (!read_servo_id("현재 ID", &current_id) ||
+        !read_servo_id("새 ID", &new_id)) {
+        printf(">> ID 변경 취소\n");
+        return false;
+    }
+    if (current_id == new_id) {
+        printf(">> 현재 ID와 새 ID가 같습니다. 변경하지 않습니다.\n");
+        return false;
+    }
+    if (!servo_ping(current_id)) {
+        printf(">> 현재 ID %u가 응답하지 않습니다. 전원/배선/보레이트를 확인하세요.\n",
+               current_id);
+        return false;
+    }
+    if (servo_ping(new_id)) {
+        printf(">> 새 ID %u가 이미 응답합니다. 사용하지 않은 ID를 선택하세요.\n",
+               new_id);
+        return false;
+    }
+
+    printf("\n  ID %u -> %u 로 변경합니다. 계속하려면 y, 취소는 아무 키나: ",
+           current_id, new_id);
+    fflush(stdout);
+    const int confirm = tolower(read_key_blocking());
+    printf("%c\n", confirm);
+    if (confirm != 'y') {
+        printf(">> ID 변경 취소 — EEPROM은 건드리지 않았습니다.\n");
+        return false;
+    }
+
+    if (!servo_torque(current_id, false)) {
+        printf(">> 토크 해제 명령 전송 실패. ID를 변경하지 않습니다.\n");
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    if (!servo_write_byte(current_id,
+                          STS3215_EEPROM_LOCK_ADDRESS,
+                          STS3215_EEPROM_UNLOCKED)) {
+        printf(">> EEPROM 잠금 해제 명령 전송 실패. ID를 변경하지 않습니다.\n");
+        return true;
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    if (!servo_write_byte(current_id, STS3215_ID_ADDRESS, new_id)) {
+        servo_write_byte(current_id,
+                         STS3215_EEPROM_LOCK_ADDRESS,
+                         STS3215_EEPROM_LOCKED);
+        printf(">> ID 기록 명령 전송 실패. EEPROM 재잠금을 시도했습니다.\n");
+        return true;
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    const bool lock_sent = servo_write_byte(new_id,
+                                             STS3215_EEPROM_LOCK_ADDRESS,
+                                             STS3215_EEPROM_LOCKED);
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    const bool new_responds = servo_ping(new_id);
+    const bool old_responds = servo_ping(current_id);
+    uint8_t lock_value = 0xff;
+    const bool lock_read = new_responds &&
+                           servo_read_byte(new_id,
+                                           STS3215_EEPROM_LOCK_ADDRESS,
+                                           &lock_value);
+
+    if (new_responds && !old_responds && lock_sent && lock_read &&
+        lock_value == STS3215_EEPROM_LOCKED) {
+        printf("\n>> 서보 ID 변경 성공: %u -> %u\n", current_id, new_id);
+        printf("   서보와 케이블에 ID %u를 표시하고, tilt_config.h의 SERVO_ID도 맞추세요.\n",
+               new_id);
+        return true;
+    }
+
+    if (new_responds && !old_responds) {
+        printf("\n!! ID는 %u로 변경됐지만 EEPROM 재잠금을 확인하지 못했습니다.\n",
+               new_id);
+        printf("   서보 전원을 끄고 한 개만 연결된 상태인지 확인한 뒤 다시 시도하세요.\n");
+        return true;
+    }
+
+    // The write may have failed before or after the ID took effect. Try both
+    // addresses so an unlocked EEPROM is not silently left behind.
+    servo_write_byte(new_id,
+                     STS3215_EEPROM_LOCK_ADDRESS,
+                     STS3215_EEPROM_LOCKED);
+    servo_write_byte(current_id,
+                     STS3215_EEPROM_LOCK_ADDRESS,
+                     STS3215_EEPROM_LOCKED);
+    printf("\n!! ID 변경 검증 실패 (이전 ID 응답=%s, 새 ID 응답=%s).\n",
+           old_responds ? "있음" : "없음",
+           new_responds ? "있음" : "없음");
+    printf("   전원을 끄고 대상 서보 한 개만 연결한 뒤 p로 현재 ID를 확인하세요.\n");
+    return true;
+}
+
+// ── 툴 3: 보레이트 스캔 ──────────────────────────────────────────────
 static void tool_scan_baud() {
     static const uint32_t CAND[] = {
         1000000, 500000, 250000, 128000, 115200, 76800, 57600, 38400, 19200, 9600
@@ -313,7 +488,7 @@ static void tool_scan_baud() {
     servo_set_baud(SERVO_UART_BAUD);
 }
 
-// ── 툴 3: 정밀 조그 (영점 잡기 본체) ─────────────────────────────────
+// ── 툴 4: 정밀 조그 (영점 잡기 본체) ─────────────────────────────────
 struct KeyMap { char key; int joint; int8_t dir; };
 static const KeyMap JOG_KEYS[12] = {
     {'q', 0, +1}, {'a', 0, -1},
@@ -387,7 +562,7 @@ static void tool_jog() {
     }
 }
 
-// ── 툴 4: 토크 해제 + 엔코더 모니터 ──────────────────────────────────
+// ── 툴 5: 토크 해제 + 엔코더 모니터 ──────────────────────────────────
 static void tool_monitor() {
     printf("\n── 엔코더 모니터 (전체 토크 OFF) ──────────────\n");
     printf("  손으로 자세를 잡으면 값이 따라옵니다.\n");
@@ -422,7 +597,7 @@ static void tool_monitor() {
     }
 }
 
-// ── 툴 5: 가동범위 탐색 ──────────────────────────────────────────────
+// ── 툴 6: 가동범위 탐색 ──────────────────────────────────────────────
 static void tool_range() {
     printf("\n── 가동범위 탐색 (전체 토크 OFF) ──────────────\n");
     printf("  각 관절을 손으로 끝에서 끝까지 천천히 움직이세요.\n");
@@ -465,7 +640,7 @@ static void tool_range() {
     }
 }
 
-// ── 툴 6: 회전 부호 판별 ─────────────────────────────────────────────
+// ── 툴 7: 회전 부호 판별 ─────────────────────────────────────────────
 static void tool_sign() {
     constexpr int PROBE = 100;   // 약 8.8도
 
@@ -511,7 +686,7 @@ static void tool_sign() {
     nvs_save_scratch();
 }
 
-// ── 툴 7: zero pose 이동 (config 검증) ───────────────────────────────
+// ── 툴 8: zero pose 이동 (config 검증) ───────────────────────────────
 static void tool_goto_zero_pose() {
     printf("\n── zero pose 이동 ─────────────────────────────\n");
     printf("  config 의 ZERO_POSE_RAD 로 천천히 이동합니다.\n");
@@ -544,6 +719,7 @@ static void print_menu() {
     printf("║  TILT 서보 셋업 / 캘리브레이션 툴            ║\n");
     printf("╚══════════════════════════════════════════════╝\n");
     printf("  p : ID 스캔 (0~253)\n");
+    printf("  i : 서보 ID 변경 (한 번에 한 개만 연결)\n");
     printf("  b : 보레이트 스캔\n");
     printf("  j : 정밀 조그  ← 영점 잡기 본체\n");
     printf("  o : 토크 해제 + 엔코더 모니터\n");
@@ -567,6 +743,9 @@ static void menu_task(void *arg) {
 
         switch (tolower(c)) {
             case 'p': tool_scan_ids();        break;
+            case 'i':
+                if (tool_change_id()) torque_on = false;
+                break;
             case 'b': tool_scan_baud();       break;
             case 'j': tool_jog();             break;
             case 'o': tool_monitor();         break;
