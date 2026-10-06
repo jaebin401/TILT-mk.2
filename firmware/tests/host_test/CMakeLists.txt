@@ -20,3 +20,10 @@ add_executable(test_filter
 target_include_directories(test_filter PRIVATE
     ../../components/tilt_MPU6050/include
     ../../components/tilt_config/include)
+
+add_executable(test_pose_test
+    test_pose_test.cpp)
+
+target_include_directories(test_pose_test PRIVATE
+    ../pose_test/main
+    ../../components/tilt_config/include)
