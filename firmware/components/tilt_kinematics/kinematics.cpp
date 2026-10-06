@@ -6,10 +6,16 @@
 namespace tilt {
 namespace {
 
-// C++17 does not make std::sqrt/std::atan2 constexpr. These literals are the
-// compile-time evaluations of the L2/L3 + ANKLE_FIXED reduction from the spec.
-constexpr float L_EFF_MM = 59.495315956686106f;
-constexpr float PHI_RAD = -0.05751861302440288f;
+// 정강이(K->A)와 발(A->S)을 하나의 가상 링크 K->S로 합친 길이와 각도.
+// config 값에서 계산하므로 링크 치수가 바뀌어도 자동으로 따라온다.
+// (C++17에서 std::sqrt/atan2는 constexpr가 아니므로 시작 시 한 번 계산되는 const.)
+const float L_EFF_MM = std::sqrt(CALF_LENGTH_MM * CALF_LENGTH_MM +
+                                 FOOT_LENGTH_MM * FOOT_LENGTH_MM +
+                                 2.0f * CALF_LENGTH_MM * FOOT_LENGTH_MM *
+                                     std::cos(ANKLE_FIXED_RAD));  // mk.2: 76.024
+const float PHI_RAD = std::atan2(
+    FOOT_LENGTH_MM * std::sin(ANKLE_FIXED_RAD),
+    CALF_LENGTH_MM + FOOT_LENGTH_MM * std::cos(ANKLE_FIXED_RAD));  // mk.2: -0.03150
 constexpr float REACH_CLAMP_EPS_MM = 0.001f;
 constexpr float PI_RAD = 3.14159265358979323846f;
 constexpr float TWO_PI_RAD = 2.0f * PI_RAD;

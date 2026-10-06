@@ -1,5 +1,8 @@
 #pragma once
 
+// WARNING(mk.2): mk.1 hip yaw 체인 기준. Y_HIP_MM 의미도 바뀌어 y 결과가 틀림.
+// roll IK로 재작성하기 전까지 사용 금지.
+
 #include "tilt_config.h"
 
 namespace tilt {
