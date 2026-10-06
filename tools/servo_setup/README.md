@@ -132,27 +132,27 @@ python servo_setup.py release \
 각 다리는 몸통에서 발 방향으로 다음 관절 순서를 사용합니다.
 
 ```text
-Hip Yaw → Hip Pitch → Knee Pitch
+Hip Roll → Hip Pitch → Knee Pitch
 ```
 
 좌우는 관찰자가 아니라 로봇이 바라보는 방향을 기준으로 합니다. 권장 ID는 십의 자리로 다리를, 일의 자리로 관절 순서를 구분합니다.
 
 | Label | ID | Joint |
 | --- | ---: | --- |
-| `LHY-11` | 11 | Left Hip Yaw |
+| `LHR-11` | 11 | Left Hip Roll |
 | `LHP-12` | 12 | Left Hip Pitch |
 | `LKP-13` | 13 | Left Knee Pitch |
-| `RHY-21` | 21 | Right Hip Yaw |
+| `RHR-21` | 21 | Right Hip Roll |
 | `RHP-22` | 22 | Right Hip Pitch |
 | `RKP-23` | 23 | Right Knee Pitch |
 
 새 서보 여섯 개가 모두 ID `1`이라면 각 모터를 하나씩 연결해 다음 순서로 할당합니다.
 
 ```text
-1 -> 11  Left Hip Yaw
+1 -> 11  Left Hip Roll
 1 -> 12  Left Hip Pitch
 1 -> 13  Left Knee Pitch
-1 -> 21  Right Hip Yaw
+1 -> 21  Right Hip Roll
 1 -> 22  Right Hip Pitch
 1 -> 23  Right Knee Pitch
 ```
