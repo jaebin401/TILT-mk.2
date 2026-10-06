@@ -84,19 +84,19 @@ static uint16_t s_range_min[NUM_JOINTS];
 static uint16_t s_range_max[NUM_JOINTS];
 
 static bool s_coarse = false;   // false = FINE(1 tick), true = COARSE
+static bool s_boot_torque_on = false;  // 부팅 시 토크 ON 성공 여부 (메뉴 t 토글 초기값)
 
 static constexpr int FINE_STEP   = 1;
 static constexpr int COARSE_STEP = 20;
 
 static const char *JOINT_LABEL[NUM_JOINTS] = {
-    "L_HIP_YAW", "L_HIP_PITCH", "L_KNEE_PITCH",
-    "R_HIP_YAW", "R_HIP_PITCH", "R_KNEE_PITCH",
+    "L_HIP_ROLL", "L_HIP_PITCH", "L_KNEE_PITCH",
+    "R_HIP_ROLL", "R_HIP_PITCH", "R_KNEE_PITCH",
 };
 
-// DH + 방향이 물리적으로 무엇인지 — 부호 판별 때 사용자에게 보여준다
 static const char *DH_PLUS_MEANING[NUM_JOINTS] = {
-    "발끝이 왼쪽으로 회전", "다리가 뒤로 스윙", "무릎이 굽음",
-    "발끝이 왼쪽으로 회전", "다리가 뒤로 스윙", "무릎이 굽음",
+    "발이 왼쪽(바깥)으로", "다리가 뒤로 스윙", "무릎이 굽음",
+    "발이 왼쪽(안쪽)으로", "다리가 뒤로 스윙", "무릎이 굽음",
 };
 
 static int   step_size()  { return s_coarse ? COARSE_STEP : FINE_STEP; }
@@ -237,6 +237,21 @@ static bool read_all(uint16_t out[NUM_JOINTS]) {
     return ok;
 }
 
+// 현재 위치를 goal로 먼저 기록한 뒤 토크 ON — 이전 goal로 튀는 것 방지.
+// (예: `o`에서 토크를 끄고 손으로 옮긴 뒤 토크를 켜면, goal이 예전 값이라 튀어 돌아갈 수 있음)
+static bool hold_and_torque_on() {
+    if (!read_all(s_cur)) {
+        printf("  위치 읽기 실패 — 토크를 켜지 않습니다. 배선/전원 확인.\n");
+        return false;
+    }
+    for (int j = 0; j < NUM_JOINTS; ++j) {
+        servo_write_tick(SERVO_ID[j], s_cur[j], 0);  // 현재 위치 = 목표 → 움직이지 않음
+        vTaskDelay(pdMS_TO_TICKS(3));
+    }
+    torque_all(true);
+    return true;
+}
+
 static int read_key_blocking() {
     uint8_t ch;
     while (true) {
@@ -311,8 +326,8 @@ static const KeyMap JOG_KEYS[12] = {
 
 static void jog_print_help() {
     printf("\n── 정밀 조그 ──────────────────────────────────\n");
-    printf("  q/a  w/s  e/d : 왼쪽  YAW / PITCH / KNEE  (+/-)\n");
-    printf("  r/f  t/g  y/h : 오른쪽 YAW / PITCH / KNEE  (+/-)\n");
+    printf("  q/a  w/s  e/d : 왼쪽  ROLL / PITCH / KNEE  (+/-)\n");
+    printf("  r/f  t/g  y/h : 오른쪽 ROLL / PITCH / KNEE  (+/-)\n");
     printf("  m : FINE(%d tick) <-> COARSE(%d tick) 토글\n", FINE_STEP, COARSE_STEP);
     printf("  i : 6축 현재 상태 표 출력\n");
     printf("  z : 지금 자세를 영점으로 확정 (배열 출력 + NVS 임시저장)\n");
@@ -320,7 +335,7 @@ static void jog_print_help() {
     printf("  현재 모드: %s (%.3f deg/step)\n\n",
            mode_name(), step_size() * DEG_PER_TICK);
     printf("  ※ DH theta 가 0.00 에 수렴하도록 맞추세요.\n");
-    printf("    YAW=발끝 정면 / PITCH=허벅지 수직 / KNEE=정강이 일직선\n\n");
+    printf("    ROLL=다리 수직(좌우 안 기울게) / PITCH=허벅지 수직 / KNEE=정강이 일직선\n\n");
 }
 
 static void jog_print_table() {
@@ -336,9 +351,8 @@ static void jog_print_table() {
 }
 
 static void tool_jog() {
-    // 현재 위치를 읽어와서 시작 (절대 점프 방지)
-    read_all(s_cur);
-    torque_all(true);
+    // 현재 위치를 goal로 기록한 뒤 시작 (절대 점프 방지)
+    if (!hold_and_torque_on()) return;
     jog_print_help();
 
     while (true) {
@@ -461,8 +475,7 @@ static void tool_sign() {
     printf("  그 움직임이 DH + 방향과 같은지 y/n 으로 답하세요.\n");
     printf("  ※ 공중에 매단 상태에서 진행하세요. x 로 중단.\n\n");
 
-    read_all(s_cur);
-    torque_all(true);
+    if (!hold_and_torque_on()) return;
 
     for (int j = 0; j < NUM_JOINTS; ++j) {
         printf("[%d/%d] %-14s : DH + 는 \"%s\"\n",
@@ -502,7 +515,7 @@ static void tool_sign() {
 static void tool_goto_zero_pose() {
     printf("\n── zero pose 이동 ─────────────────────────────\n");
     printf("  config 의 ZERO_POSE_RAD 로 천천히 이동합니다.\n");
-    printf("  [0, -20, +20] deg — 구부정한 기본자세\n");
+    printf("  [0, -20, +40] deg — 발바닥이 지면과 평행한 기본자세\n");
     printf("  ※ 로봇이 넘어지지 않게 잡거나 매단 상태에서!\n");
     printf("  계속하려면 g, 취소는 아무 키나: ");
     fflush(stdout);
@@ -511,8 +524,7 @@ static void tool_goto_zero_pose() {
     printf("%c\n", c);
     if (c != 'g') { printf(">> 취소\n"); return; }
 
-    read_all(s_cur);
-    torque_all(true);
+    if (!hold_and_torque_on()) return;
 
     for (int j = 0; j < NUM_JOINTS; ++j) {
         uint16_t target = dh_rad_to_tick(j, ZERO_POSE_RAD[j]);
@@ -521,8 +533,8 @@ static void tool_goto_zero_pose() {
         servo_write_tick(SERVO_ID[j], target, 300);   // 느리게
         vTaskDelay(pdMS_TO_TICKS(400));
     }
-    printf(">> 완료. 발판이 지면과 평행하고 접지점이 Hip Yaw 축 바로 아래인지 확인하세요.\n");
-    printf("   (지면~torso 원점 높이가 약 %.0fmm 여야 함)\n\n", ZERO_POSE_HEIGHT_MM);
+    printf(">> 완료. 발판이 지면과 평행하고 발바닥 점이 hip pitch 축 바로 아래인지 확인하세요.\n");
+    printf("   (지면~hip pitch 축 높이가 약 %.0fmm 여야 함)\n\n", ZERO_POSE_HEIGHT_MM);
 }
 
 // ── 메뉴 ─────────────────────────────────────────────────────────────
@@ -547,7 +559,7 @@ static void print_menu() {
 
 static void menu_task(void *arg) {
     print_menu();
-    bool torque_on = true;
+    bool torque_on = s_boot_torque_on;
 
     while (true) {
         int c = read_key_blocking();
@@ -567,8 +579,12 @@ static void menu_task(void *arg) {
                 break;
             case 'c': nvs_clear_scratch();    break;
             case 't':
-                torque_on = !torque_on;
-                torque_all(torque_on);
+                if (torque_on) {
+                    torque_all(false);
+                    torque_on = false;
+                } else {
+                    torque_on = hold_and_torque_on();
+                }
                 printf(">> 전체 토크 %s\n", torque_on ? "ON" : "OFF");
                 break;
             case 'h': print_menu();           break;
@@ -610,8 +626,12 @@ extern "C" void app_main(void) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    torque_all(true);
-    printf("토크 ON 완료.\n");
+    s_boot_torque_on = hold_and_torque_on();
+    if (s_boot_torque_on) {
+        printf("토크 ON 완료 (현재 위치 유지).\n");
+    } else {
+        printf("토크 OFF 상태로 시작합니다. 문제 해결 후 t 로 켜세요.\n");
+    }
 
     xTaskCreate(menu_task, "menu", 6144, nullptr, 5, nullptr);
 }
