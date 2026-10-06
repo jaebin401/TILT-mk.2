@@ -66,14 +66,13 @@ inline constexpr int SERVO_POS_MAX = 4095;
 inline constexpr float DEG_PER_TICK = 360.0f / SERVO_TICKS_PER_REV;
 inline constexpr float RAD_PER_TICK = 6.28318530718f / SERVO_TICKS_PER_REV;
 
-// TODO: Measure and replace all six calibration values with tools/servo_tool.
 inline constexpr std::uint16_t ZERO_TICK[NUM_JOINTS] = {
-    2048,  // L_HIP_ROLL
-    2048,  // L_HIP_PITCH
-    2048,  // L_KNEE_PITCH
-    2048,  // R_HIP_ROLL
-    2048,  // R_HIP_PITCH
-    2048,  // R_KNEE_PITCH
+    2062,  // L_HIP_ROLL
+    2036,  // L_HIP_PITCH
+    2125,  // L_KNEE_PITCH
+    2044,  // R_HIP_ROLL
+    2070,  // R_HIP_PITCH
+    2056,  // R_KNEE_PITCH
 };
 
 // raw tick 증가 방향이 관절 + 방향과 같으면 +1.
@@ -84,8 +83,12 @@ inline constexpr std::uint16_t ZERO_TICK[NUM_JOINTS] = {
 // 아래 값은 예측값 — servo_tool `s` 부호 판별로 확정할 것.
 
 inline constexpr std::int8_t JOINT_SIGN[NUM_JOINTS] = {
-    +1, +1, +1,   // L: HR, HP, KP
-    -1, -1, -1,   // R: HR, HP, KP
+    -1,  // L_HIP_ROLL
+    -1,  // L_HIP_PITCH
+    -1,  // L_KNEE_PITCH
+    -1,  // R_HIP_ROLL
+    +1,  // R_HIP_PITCH
+    +1,  // R_KNEE_PITCH
 };
 
 // zero pose.
@@ -113,14 +116,14 @@ struct JointLimit {
 // mk.2: roll은 실측 전 임시 ±10°. pitch/knee는 mk.1 실측값 — servo_tool `l`로 재측정 후 교체.
 inline constexpr JointLimit JOINT_LIMIT[2][3] = {
     {
-        {   -10.0f * DEG2RAD,   +10.0f * DEG2RAD },  // L_HIP_ROLL (임시)
-        {   -75.0f * DEG2RAD,   +76.10f * DEG2RAD },  // L_HIP_PITCH (mk.1)
-        {   -85.0f * DEG2RAD,  +108.0f * DEG2RAD },  // L_KNEE_PITCH (mk.1)
+        {   -13.0f * DEG2RAD,   +17.0f * DEG2RAD },  // L_HIP_ROLL (임시)
+        {   -92.0f * DEG2RAD,   +20.0f * DEG2RAD },  // L_HIP_PITCH (mk.1)
+        {   -85.0f * DEG2RAD,  +76.0f * DEG2RAD },  // L_KNEE_PITCH (mk.1)
     },
     {
-        {   -10.0f * DEG2RAD,   +10.0f * DEG2RAD },  // R_HIP_ROLL (임시)
-        {   -75.0f * DEG2RAD,   +76.10f * DEG2RAD },  // R_HIP_PITCH (mk.1)
-        {   -85.0f * DEG2RAD,  +108.0f * DEG2RAD },  // R_KNEE_PITCH (mk.1)
+        {   -13.0f * DEG2RAD,   +17.0f * DEG2RAD },  // R_HIP_ROLL (임시)
+        {   -92.0f * DEG2RAD,   +20.0f * DEG2RAD },  // R_HIP_PITCH (mk.1)
+        {   -85.0f * DEG2RAD,  +76.0f * DEG2RAD },  // R_KNEE_PITCH (mk.1)
     },
 };
 
