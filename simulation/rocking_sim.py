@@ -10,6 +10,7 @@ reported as validation gaps rather than silently guessed.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import csv
 import json
 import math
@@ -24,6 +25,16 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_PATH = ROOT / "model" / "mjcf" / "scene.xml"
 RESULTS_DIR = ROOT / "simulation" / "results"
+CPP_GAIT_LIBRARY = ROOT / "simulation" / "build" / "libtilt_rocking_gait.dylib"
+CPP_PHASE_NAMES = (
+    "IDLE",
+    "SETTLE",
+    "TRANSFER",
+    "LIFT",
+    "HOLD",
+    "LOWER",
+    "TOUCHDOWN",
+)
 
 LEG_JOINTS = (
     "r_hip_roll",
@@ -81,6 +92,66 @@ class Metrics:
     max_torso_pitch_deg: float
     nonfoot_floor_contact: bool
     fell: bool
+
+
+class CppRockingOutput(ctypes.Structure):
+    _fields_ = [
+        ("position_rad", ctypes.c_float * 6),
+        ("phase", ctypes.c_uint8),
+        ("support_side", ctypes.c_uint8),
+        ("completed_events", ctypes.c_uint64),
+        ("running", ctypes.c_uint8),
+    ]
+
+
+class CppRockingGait:
+    """ctypes wrapper around the same C++ gait core used by ESP-IDF."""
+
+    def __init__(self, preset: str):
+        if not CPP_GAIT_LIBRARY.exists():
+            raise FileNotFoundError(
+                f"C++ gait library not found: {CPP_GAIT_LIBRARY}\n"
+                "Build it with: cmake -S simulation -B simulation/build && "
+                "cmake --build simulation/build"
+            )
+        self.library = ctypes.CDLL(str(CPP_GAIT_LIBRARY))
+        self.library.tilt_rocking_create.argtypes = [ctypes.c_int]
+        self.library.tilt_rocking_create.restype = ctypes.c_void_p
+        self.library.tilt_rocking_destroy.argtypes = [ctypes.c_void_p]
+        self.library.tilt_rocking_start.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self.library.tilt_rocking_cycle_duration_ms.argtypes = [ctypes.c_void_p]
+        self.library.tilt_rocking_cycle_duration_ms.restype = ctypes.c_uint32
+        self.library.tilt_rocking_update.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.POINTER(CppRockingOutput),
+        ]
+        self.library.tilt_rocking_update.restype = ctypes.c_int
+        self.handle = self.library.tilt_rocking_create(1 if preset == "visual" else 0)
+        if not self.handle:
+            raise RuntimeError("failed to create C++ RockingGait")
+
+    def close(self) -> None:
+        if self.handle:
+            self.library.tilt_rocking_destroy(self.handle)
+            self.handle = None
+
+    def start(self) -> None:
+        self.library.tilt_rocking_start(self.handle, 0)
+
+    def cycle_duration_ms(self) -> int:
+        return int(self.library.tilt_rocking_cycle_duration_ms(self.handle))
+
+    def update(self, dt_ms: int) -> tuple[np.ndarray, CppRockingOutput]:
+        output = CppRockingOutput()
+        if not self.library.tilt_rocking_update(
+            self.handle, dt_ms, ctypes.byref(output)
+        ):
+            raise RuntimeError("C++ RockingGait update failed")
+        firmware_order = np.asarray(output.position_rad, dtype=float)
+        # Firmware: [LHR,LHP,LKP,RHR,RHP,RKP]. MJCF: right leg, then left.
+        model_order = firmware_order[[3, 4, 5, 0, 1, 2]]
+        return model_order, output
 
 
 def smoothstep5(x: float) -> float:
@@ -458,6 +529,106 @@ class Simulator:
                 time.sleep(min(self.data.time - elapsed, 0.01))
         active_viewer.close()
 
+    def run_cpp_gait(
+        self,
+        preset: str,
+        cycles: int,
+        viewer: bool,
+        forever: bool,
+    ) -> dict[str, float | int | str]:
+        """Drive MuJoCo from the shared C++ gait core."""
+        if forever and not viewer:
+            raise ValueError("--forever with the C++ gait requires a viewer")
+        gait = CppRockingGait(preset)
+        try:
+            self.reset()
+            gait.start()
+            dt = self.model.opt.timestep
+            control_ms = max(1, round(self.control_period * 1000.0))
+            end_time = math.inf if forever else (
+                1.0 + cycles * gait.cycle_duration_ms() / 1000.0 + 0.5
+            )
+            q_target = np.deg2rad(STAND_DEG)
+            next_control = 0.0
+            last_phase = -1
+            last_events = 0
+            max_left_z = max_right_z = 0.0
+            peak_torque = peak_speed = 0.0
+            max_torso_roll = max_torso_pitch = 0.0
+            min_com_z = math.inf
+            nonfoot_floor_contact = False
+            fell = False
+
+            active_viewer = None
+            if viewer:
+                from mujoco import viewer as mj_viewer
+
+                active_viewer = mj_viewer.launch_passive(self.model, self.data)
+            wall_start = time.perf_counter()
+
+            while self.data.time < end_time:
+                if active_viewer is not None and not active_viewer.is_running():
+                    break
+                if self.data.time + 1e-12 >= next_control:
+                    q_target, output = gait.update(control_ms)
+                    q_target = np.round(q_target / ENCODER_STEP_RAD) * ENCODER_STEP_RAD
+                    next_control += self.control_period
+                    if output.phase != last_phase or output.completed_events != last_events:
+                        print(
+                            f"cpp phase={CPP_PHASE_NAMES[int(output.phase)]} "
+                            f"support={'LEFT' if int(output.support_side) == 0 else 'RIGHT'} "
+                            f"events={int(output.completed_events)}"
+                        )
+                        last_phase = int(output.phase)
+                        last_events = int(output.completed_events)
+
+                q = self.data.qpos[self.qpos_ids].copy()
+                qd = self.data.qvel[self.dof_ids].copy()
+                desired_torque = self.kp * (q_target - q) - self.kd * qd
+                torque = torque_speed_limit(desired_torque, qd)
+                self.data.qfrc_applied[:] = 0.0
+                self.data.qfrc_applied[self.dof_ids] = torque
+                self.data.ctrl[6:] = 0.0
+                mujoco.mj_step(self.model, self.data)
+
+                max_left_z = max(max_left_z, self.data.site_xpos[self.site_ids["left"], 2])
+                max_right_z = max(max_right_z, self.data.site_xpos[self.site_ids["right"], 2])
+                peak_torque = max(peak_torque, float(np.max(np.abs(torque))))
+                peak_speed = max(peak_speed, float(np.max(np.abs(qd))))
+                roll_deg, pitch_deg = quat_to_roll_pitch_deg(self.data.qpos[3:7])
+                com_z = float(self.data.subtree_com[self.torso_id, 2])
+                _, nonfoot = self.foot_forces()
+                max_torso_roll = max(max_torso_roll, abs(roll_deg))
+                max_torso_pitch = max(max_torso_pitch, abs(pitch_deg))
+                min_com_z = min(min_com_z, com_z)
+                nonfoot_floor_contact = nonfoot_floor_contact or nonfoot
+                fell = fell or abs(roll_deg) > 45.0 or abs(pitch_deg) > 45.0 or com_z < 0.12
+
+                if active_viewer is not None:
+                    active_viewer.sync()
+                    elapsed = time.perf_counter() - wall_start
+                    if self.data.time > elapsed:
+                        time.sleep(min(self.data.time - elapsed, 0.01))
+
+            if active_viewer is not None:
+                active_viewer.close()
+            return {
+                "gait_source": "cpp",
+                "preset": preset,
+                "completed_events": last_events,
+                "max_left_sole_mm": max_left_z * 1000.0,
+                "max_right_sole_mm": max_right_z * 1000.0,
+                "peak_torque_nm": peak_torque,
+                "peak_speed_rad_s": peak_speed,
+                "max_torso_roll_deg": max_torso_roll,
+                "max_torso_pitch_deg": max_torso_pitch,
+                "min_com_z_mm": min_com_z * 1000.0,
+                "nonfoot_floor_contact": nonfoot_floor_contact,
+                "fell": fell,
+            }
+        finally:
+            gait.close()
+
 
 def score(metric: Metrics) -> float:
     return (
@@ -528,6 +699,8 @@ def save_plot(logs: dict[str, np.ndarray], output: Path) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--support", choices=("left", "right", "both"), default="both")
+    parser.add_argument("--gait-source", choices=("python", "cpp"), default="python")
+    parser.add_argument("--preset", choices=("conservative", "visual"), default="visual")
     parser.add_argument("--cycles", type=int, default=1)
     parser.add_argument("--roll-deg", type=float, default=11.0)
     parser.add_argument("--roll-time", type=float, default=0.15)
@@ -551,6 +724,18 @@ def main() -> None:
     if args.search:
         rows = search_parameters(sim, args.output)
         print(json.dumps({"output": str(args.output), "top": rows[:10]}, indent=2))
+        return
+
+    if args.gait_source == "cpp":
+        if args.support != "both":
+            raise ValueError("the shared C++ gait currently alternates both support sides")
+        result = sim.run_cpp_gait(
+            preset=args.preset,
+            cycles=args.cycles,
+            viewer=args.viewer or args.forever,
+            forever=args.forever,
+        )
+        print(json.dumps(result, indent=2))
         return
 
     sides = [args.support] if args.support != "both" else ["left", "right"]

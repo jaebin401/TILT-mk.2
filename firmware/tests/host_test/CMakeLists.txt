@@ -27,3 +27,11 @@ add_executable(test_pose_test
 target_include_directories(test_pose_test PRIVATE
     ../pose_test/main
     ../../components/tilt_config/include)
+
+add_executable(test_rocking_gait
+    test_rocking_gait.cpp
+    ../../components/tilt_gait/RockingGait.cpp)
+
+target_include_directories(test_rocking_gait PRIVATE
+    ../../components/tilt_gait/include
+    ../../components/tilt_config/include)

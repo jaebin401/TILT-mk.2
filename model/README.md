@@ -51,11 +51,27 @@ Repeat continuously until the viewer window is closed:
 ./.venv/bin/python ./.venv/bin/mjpython simulation/rocking_sim.py --support both --forever
 ```
 
+Build and visualize the shared C++ gait used by `firmware/tests/rocking_test`:
+
+```bash
+cmake -S simulation -B simulation/build
+cmake --build simulation/build
+./.venv/bin/python ./.venv/bin/mjpython simulation/rocking_sim.py \
+  --gait-source cpp --preset visual --forever
+```
+
+The C++ gait uses asymmetric hip-roll targets: a small loaded-hip target moves
+the torso over the stance foot, while a larger opposite swing-hip target tucks
+the lifted foot inward. Touchdown transitions immediately into the next
+left-to-right/right-to-left load transfer, without a stationary recenter or DSP
+dwell.
+
 This is a best-case 7.4 V source model. Measure loaded bus voltage, joint zero offsets, and at least one
 loaded 60° motion before using the simulation result as a hardware command table.
 
-The first coarse sweep found brief SSP candidates, but every mechanically successful candidate touched
-the 19.5 kgf·cm stall envelope. Treat those results as proof that the motion is dynamically possible, not
-as a hardware-safe command table; the hip-roll current/torque model must be calibrated on the real robot.
+The first coarse sweep touched the 19.5 kgf·cm stall envelope. The continuous asymmetric gait reduces the
+simulated peak slightly, but still approaches stall torque and exceeds rated torque. Treat these results as
+proof that the motion is dynamically possible, not as a hardware-safe command table; the hip-roll
+current/torque model must be calibrated on the real robot.
 
 View: `./.venv/bin/python ./.venv/bin/mjpython -m mujoco.viewer --mjcf=model/mjcf/scene_view.xml`
