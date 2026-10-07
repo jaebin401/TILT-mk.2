@@ -1,0 +1,190 @@
+<mujoco model="tilt_mjcf">
+  <compiler angle="radian" meshdir="../meshes" autolimits="true" />
+  <default>
+    <default class="tilt_mjcf">
+      <joint frictionloss="0.1" armature="0.005" />
+      <position kp="50" dampratio="1" />
+      <default class="visual">
+        <geom type="mesh" contype="0" conaffinity="0" group="2" />
+      </default>
+      <default class="collision">
+        <geom group="3" />
+      </default>
+    </default>
+  </default>
+  <worldbody>
+    <!-- Link assembly_1 -->
+    <body name="torso" pos="0 0 0" quat="1 0 0 0" childclass="tilt_mjcf">
+      <freejoint name="torso_freejoint" />
+      <inertial pos="-0.0351133 0.0707522 0.228508" mass="0.51291" fullinertia="0.00275067 0.00211738 0.00105409 -6.5361e-08 -1.36569e-05 5.43081e-06" />
+      <!-- Part assembly_1_parts -->
+      <geom type="mesh" class="visual" pos="-0.0351133 0.0707522 0.228508" quat="1 0 0 0" mesh="assembly_1_visual" material="assembly_1_visual_material" />
+      <geom type="mesh" class="collision" pos="-0.0351133 0.0707522 0.228508" quat="1 0 0 0" mesh="assembly_1_collision" material="assembly_1_collision_material" />
+      <!-- Link hip_pitch_mount -->
+      <body name="r_hip" pos="-0.0168142 0.0579123 0.144054" quat="0.5 -0.5 -0.5 0.5">
+        <!-- Joint from assembly_1 to hip_pitch_mount -->
+        <joint axis="0 0 -1" name="r_hip_roll" type="hinge" range="-0.226893 0.296706" />
+        <inertial pos="-0.0119393 8.041e-09 0.0229228" mass="0.0102" fullinertia="4.10473e-06 4.83245e-06 1.62126e-06 -0 -2.47838e-07 -1e-12" />
+        <!-- Part hip_pitch_mount_parts -->
+        <geom type="mesh" class="visual" pos="-0.0119393 8.041e-09 0.0229228" quat="0.5 0.5 0.5 -0.5" mesh="hip_pitch_mount_visual" material="hip_pitch_mount_visual_material" />
+        <geom type="mesh" class="collision" pos="-0.0119393 8.041e-09 0.0229228" quat="0.5 0.5 0.5 -0.5" mesh="hip_pitch_mount_collision" material="hip_pitch_mount_collision_material" />
+        <!-- Link thigh -->
+        <body name="r_thigh" pos="-0.024 0 0.0182" quat="0 0.707107 0 0.707107">
+          <!-- Joint from hip_pitch_mount to thigh -->
+          <joint axis="0 0 1" name="r_hip_pitch" type="hinge" range="-1.605703 0.349066" />
+          <inertial pos="4.30367e-05 -0.0211469 -0.0184847" mass="0.07791" fullinertia="3.44422e-05 1.42377e-05 2.97987e-05 5.036e-08 -1.883e-09 2.05053e-07" />
+          <!-- Part thigh_parts -->
+          <geom type="mesh" class="visual" pos="4.30367e-05 -0.0211469 -0.0184847" quat="0 -0 0.707107 0.707107" mesh="thigh_visual" material="thigh_visual_material" />
+          <geom type="mesh" class="collision" pos="4.30367e-05 -0.0211469 -0.0184847" quat="0 -0 0.707107 0.707107" mesh="thigh_collision" material="thigh_collision_material" />
+          <!-- Link calf_l -->
+          <body name="r_calf" pos="0.0001 -0.0679996 0" quat="0.707107 -0 -0 -0.707107">
+            <!-- Joint from thigh to calf_l -->
+            <joint axis="0 0 1" name="r_knee_pitch" type="hinge" range="-1.483530 1.326450" />
+            <inertial pos="0.0305877 -3.15613e-05 -0.0184448" mass="0.09434" fullinertia="1.86752e-05 7.16997e-05 7.15331e-05 -1.38513e-06 -4.18065e-07 2.57e-10" />
+            <!-- Part calf_l_parts -->
+            <geom type="mesh" class="visual" pos="0.0305877 -3.15613e-05 -0.0184448" quat="0.5 0.5 -0.5 -0.5" mesh="calf_l_visual" material="calf_l_visual_material" />
+            <geom type="mesh" class="collision" pos="0.0305877 -3.15613e-05 -0.0184448" quat="0.5 0.5 -0.5 -0.5" mesh="calf_l_collision" material="calf_l_collision_material" />
+            <site name="r_sole" pos="0.0764267 -0.00269444 -0.0181989" quat="0.405576 0.405582 -0.579228 -0.579229" size="0.005" />
+          </body>
+        </body>
+      </body>
+      <!-- Link hip_pitch_mount_2 -->
+      <body name="l_hip" pos="-0.0168142 0.0839123 0.144054" quat="0.5 0.5 -0.5 -0.5">
+        <!-- Joint from assembly_1 to hip_pitch_mount_2 -->
+        <joint axis="0 0 -1" name="l_hip_roll" type="hinge" range="-0.226893 0.296706" />
+        <inertial pos="-0.0119393 8.041e-09 0.0229228" mass="0.0102" fullinertia="4.10473e-06 4.83245e-06 1.62126e-06 -0 -2.47838e-07 -1e-12" />
+        <!-- Part hip_pitch_mount_2_parts -->
+        <geom type="mesh" class="visual" pos="-0.0119393 8.041e-09 0.0229228" quat="0.5 -0.5 0.5 0.5" mesh="hip_pitch_mount_2_visual" material="hip_pitch_mount_2_visual_material" />
+        <geom type="mesh" class="collision" pos="-0.0119393 8.041e-09 0.0229228" quat="0.5 -0.5 0.5 0.5" mesh="hip_pitch_mount_2_collision" material="hip_pitch_mount_2_collision_material" />
+        <!-- Link thigh_2 -->
+        <body name="l_thigh" pos="-0.024 -0 0.0182" quat="0.5 -0.5 0.5 -0.5">
+          <!-- Joint from hip_pitch_mount_2 to thigh_2 -->
+          <joint axis="0 0 -1" name="l_hip_pitch" type="hinge" range="-1.605703 0.349066" />
+          <inertial pos="0.0211469 4.30366e-05 -0.0184847" mass="0.07791" fullinertia="1.42377e-05 3.44422e-05 2.97987e-05 -5.036e-08 -2.05053e-07 -1.883e-09" />
+          <!-- Part thigh_2_parts -->
+          <geom type="mesh" class="visual" pos="0.0211469 4.30366e-05 -0.0184847" quat="0.5 -0.5 -0.5 0.5" mesh="thigh_2_visual" material="thigh_2_visual_material" />
+          <geom type="mesh" class="collision" pos="0.0211469 4.30366e-05 -0.0184847" quat="0.5 -0.5 -0.5 0.5" mesh="thigh_2_collision" material="thigh_2_collision_material" />
+          <!-- Link calf_r -->
+          <body name="l_calf" pos="0.0679996 0.0001 0" quat="1 -0 -0 0">
+            <!-- Joint from thigh_2 to calf_r -->
+            <joint axis="0 0 -1" name="l_knee_pitch" type="hinge" range="-1.483530 1.326450" />
+            <inertial pos="0.0305877 3.15603e-05 -0.0185256" mass="0.09434" fullinertia="1.86699e-05 7.16944e-05 7.15332e-05 1.38513e-06 -2.23424e-07 9.5e-11" />
+            <!-- Part calf_r_parts -->
+            <geom type="mesh" class="visual" pos="0.0305877 3.15603e-05 -0.0185256" quat="0.5 -0.5 -0.5 0.5" mesh="calf_r_visual" material="calf_r_visual_material" />
+            <geom type="mesh" class="collision" pos="0.0305877 3.15603e-05 -0.0185256" quat="0.5 -0.5 -0.5 0.5" mesh="calf_r_collision" material="calf_r_collision_material" />
+            <site name="l_sole" pos="0.0764293 0.00269369 -0.0183993" quat="0.405578 -0.40558 -0.579229 0.579228" size="0.005" />
+          </body>
+        </body>
+      </body>
+      <!-- Link assembly_1_2 -->
+      <body name="head" pos="-0.0351142 0.0943123 0.352973" quat="0.5 -0.5 -0.5 -0.5">
+        <!-- Joint from assembly_1 to assembly_1_2 -->
+        <joint axis="0 0 1" name="head_pitch" type="hinge" range="-0.785398 0.785398" />
+        <inertial pos="0.00506142 0.038219 -0.0241988" mass="0.29357" fullinertia="0.000538412 0.00061953 0.00028 6.00935e-05 3.7504e-06 -7.21567e-06" />
+        <!-- Part assembly_1_2_parts -->
+        <geom type="mesh" class="visual" pos="0.00506142 0.038219 -0.0241988" quat="0.5 0.5 0.5 0.5" mesh="assembly_1_2_visual" material="assembly_1_2_visual_material" />
+        <geom type="mesh" class="collision" pos="0.00506142 0.038219 -0.0241988" quat="0.5 0.5 0.5 0.5" mesh="assembly_1_2_collision" material="assembly_1_2_collision_material" />
+      </body>
+      <!-- Link shoulder -->
+      <body name="r_shoulder" pos="-0.0351142 -0.0415877 0.246073" quat="0.707107 -0.707107 -0 0">
+        <!-- Joint from assembly_1 to shoulder -->
+        <joint axis="0 0 1" name="r_arm_pitch" type="hinge" range="-1.570796 1.570796" />
+        <inertial pos="-0.000808697 -6e-12 -0.0115843" mass="0.01015" fullinertia="1.54247e-06 4.26025e-06 3.75091e-06 0 -9.3704e-08 -0" />
+        <!-- Part shoulder_parts -->
+        <geom type="mesh" class="visual" pos="-0.000808697 -6e-12 -0.0115843" quat="0.707107 0.707107 0 -0" mesh="shoulder_visual" material="shoulder_visual_material" />
+        <geom type="mesh" class="collision" pos="-0.000808697 -6e-12 -0.0115843" quat="0.707107 0.707107 0 -0" mesh="shoulder_collision" material="shoulder_collision_material" />
+        <!-- Link arm_r_assembly -->
+        <body name="r_arm" pos="0.01835 1.47e-10 -0.023" quat="0.707107 0 0.707107 0">
+          <!-- Joint from shoulder to arm_r_assembly -->
+          <joint axis="0 0 1" name="r_arm_roll" type="hinge" range="-1.570796 1.570796" />
+          <inertial pos="0.0178203 0.00182182 -0.0179663" mass="0.02385" fullinertia="2.34983e-06 1.55679e-05 1.39963e-05 -5.1197e-07 9.266e-08 8.15e-09" />
+          <!-- Part arm_r_assembly_parts -->
+          <geom type="mesh" class="visual" pos="0.0178203 0.00182182 -0.0179663" quat="0.5 0.5 -0.5 0.5" mesh="arm_r_assembly_visual" material="arm_r_assembly_visual_material" />
+          <geom type="mesh" class="collision" pos="0.0178203 0.00182182 -0.0179663" quat="0.5 0.5 -0.5 0.5" mesh="arm_r_assembly_collision" material="arm_r_assembly_collision_material" />
+        </body>
+      </body>
+      <!-- Link shoulder_2 -->
+      <body name="l_shoulder" pos="-0.0351142 0.183212 0.246073" quat="0.707107 0.707107 0 0">
+        <!-- Joint from assembly_1 to shoulder_2 -->
+        <joint axis="0 0 -1" name="l_arm_pitch" type="hinge" range="-1.570796 1.570796" />
+        <inertial pos="-0.000808697 -6e-12 -0.0115843" mass="0.01015" fullinertia="1.54247e-06 4.26025e-06 3.75091e-06 0 -9.3704e-08 -0" />
+        <!-- Part shoulder_2_parts -->
+        <geom type="mesh" class="visual" pos="-0.000808697 -6e-12 -0.0115843" quat="0.707107 -0.707107 -0 -0" mesh="shoulder_2_visual" material="shoulder_2_visual_material" />
+        <geom type="mesh" class="collision" pos="-0.000808697 -6e-12 -0.0115843" quat="0.707107 -0.707107 -0 -0" mesh="shoulder_2_collision" material="shoulder_2_collision_material" />
+        <!-- Link arm_l_assembly -->
+        <body name="l_arm" pos="0.01835 1.47e-10 -0.023" quat="0.707107 -0 0.707107 0">
+          <!-- Joint from shoulder_2 to arm_l_assembly -->
+          <joint axis="0 0 1" name="l_arm_roll" type="hinge" range="-1.570796 1.570796" />
+          <inertial pos="0.0178203 -0.00182182 -0.0179663" mass="0.02385" fullinertia="2.34983e-06 1.55679e-05 1.39963e-05 5.1197e-07 9.266e-08 -8.15e-09" />
+          <!-- Part arm_l_assembly_parts -->
+          <geom type="mesh" class="visual" pos="0.0178203 -0.00182182 -0.0179663" quat="0.5 -0.5 -0.5 -0.5" mesh="arm_l_assembly_visual" material="arm_l_assembly_visual_material" />
+          <geom type="mesh" class="collision" pos="0.0178203 -0.00182182 -0.0179663" quat="0.5 -0.5 -0.5 -0.5" mesh="arm_l_assembly_collision" material="arm_l_assembly_collision_material" />
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <asset>
+    <mesh file="assembly_1_2_collision.stl" />
+    <mesh file="assembly_1_2_visual.stl" />
+    <mesh file="shoulder_collision.stl" />
+    <mesh file="calf_l_visual.stl" />
+    <mesh file="calf_l_collision.stl" />
+    <mesh file="arm_l_assembly_collision.stl" />
+    <mesh file="hip_pitch_mount_visual.stl" />
+    <mesh file="arm_r_assembly_visual.stl" />
+    <mesh file="hip_pitch_mount_2_visual.stl" />
+    <mesh file="assembly_1_visual.stl" />
+    <mesh file="arm_r_assembly_collision.stl" />
+    <mesh file="calf_r_visual.stl" />
+    <mesh file="thigh_2_visual.stl" />
+    <mesh file="assembly_1_collision.stl" />
+    <mesh file="shoulder_2_visual.stl" />
+    <mesh file="thigh_visual.stl" />
+    <mesh file="arm_l_assembly_visual.stl" />
+    <mesh file="shoulder_visual.stl" />
+    <mesh file="shoulder_2_collision.stl" />
+    <mesh file="hip_pitch_mount_collision.stl" />
+    <mesh file="thigh_collision.stl" />
+    <mesh file="hip_pitch_mount_2_collision.stl" />
+    <mesh file="calf_r_collision.stl" />
+    <mesh file="thigh_2_collision.stl" />
+    <material name="assembly_1_visual_material" rgba="0.26494 0.290247 0.320604 1" />
+    <material name="assembly_1_collision_material" rgba="0.26494 0.290247 0.320604 1" />
+    <material name="hip_pitch_mount_visual_material" rgba="0.215686 0.215686 0.215686 1" />
+    <material name="hip_pitch_mount_collision_material" rgba="0.215686 0.215686 0.215686 1" />
+    <material name="thigh_visual_material" rgba="0.240149 0.240149 0.240159 1" />
+    <material name="thigh_collision_material" rgba="0.240149 0.240149 0.240159 1" />
+    <material name="calf_l_visual_material" rgba="0.235889 0.235889 0.235897 1" />
+    <material name="calf_l_collision_material" rgba="0.235889 0.235889 0.235897 1" />
+    <material name="hip_pitch_mount_2_visual_material" rgba="0.215686 0.215686 0.215686 1" />
+    <material name="hip_pitch_mount_2_collision_material" rgba="0.215686 0.215686 0.215686 1" />
+    <material name="thigh_2_visual_material" rgba="0.240149 0.240149 0.240159 1" />
+    <material name="thigh_2_collision_material" rgba="0.240149 0.240149 0.240159 1" />
+    <material name="calf_r_visual_material" rgba="0.235889 0.235889 0.235897 1" />
+    <material name="calf_r_collision_material" rgba="0.235889 0.235889 0.235897 1" />
+    <material name="assembly_1_2_visual_material" rgba="0.384639 0.384639 0.384639 1" />
+    <material name="assembly_1_2_collision_material" rgba="0.384639 0.384639 0.384639 1" />
+    <material name="shoulder_visual_material" rgba="0.215686 0.215686 0.215686 1" />
+    <material name="shoulder_collision_material" rgba="0.215686 0.215686 0.215686 1" />
+    <material name="arm_r_assembly_visual_material" rgba="0.204176 0.250216 0.44095 1" />
+    <material name="arm_r_assembly_collision_material" rgba="0.204176 0.250216 0.44095 1" />
+    <material name="shoulder_2_visual_material" rgba="0.215686 0.215686 0.215686 1" />
+    <material name="shoulder_2_collision_material" rgba="0.215686 0.215686 0.215686 1" />
+    <material name="arm_l_assembly_visual_material" rgba="0.204176 0.250216 0.44095 1" />
+    <material name="arm_l_assembly_collision_material" rgba="0.204176 0.250216 0.44095 1" />
+  </asset>
+  <actuator>
+    <position class="tilt_mjcf" name="r_hip_roll" joint="r_hip_roll" ctrlrange="-0.226893 0.296706" forcerange="-1.9 1.9" />
+    <position class="tilt_mjcf" name="r_hip_pitch" joint="r_hip_pitch" ctrlrange="-1.605703 0.349066" forcerange="-1.9 1.9" />
+    <position class="tilt_mjcf" name="r_knee_pitch" joint="r_knee_pitch" ctrlrange="-1.483530 1.326450" forcerange="-1.9 1.9" />
+    <position class="tilt_mjcf" name="l_hip_roll" joint="l_hip_roll" ctrlrange="-0.226893 0.296706" forcerange="-1.9 1.9" />
+    <position class="tilt_mjcf" name="l_hip_pitch" joint="l_hip_pitch" ctrlrange="-1.605703 0.349066" forcerange="-1.9 1.9" />
+    <position class="tilt_mjcf" name="l_knee_pitch" joint="l_knee_pitch" ctrlrange="-1.483530 1.326450" forcerange="-1.9 1.9" />
+    <position class="tilt_mjcf" name="head_pitch" joint="head_pitch" ctrlrange="-0.785398 0.785398" forcerange="-1.0 1.0" />
+    <position class="tilt_mjcf" name="r_arm_pitch" joint="r_arm_pitch" ctrlrange="-1.570796 1.570796" forcerange="-0.18 0.18" />
+    <position class="tilt_mjcf" name="r_arm_roll" joint="r_arm_roll" ctrlrange="-1.570796 1.570796" forcerange="-0.18 0.18" />
+    <position class="tilt_mjcf" name="l_arm_pitch" joint="l_arm_pitch" ctrlrange="-1.570796 1.570796" forcerange="-0.18 0.18" />
+    <position class="tilt_mjcf" name="l_arm_roll" joint="l_arm_roll" ctrlrange="-1.570796 1.570796" forcerange="-0.18 0.18" />
+  </actuator>
+  <equality />
+</mujoco>
