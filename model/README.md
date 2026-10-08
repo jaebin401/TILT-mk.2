@@ -75,3 +75,16 @@ proof that the motion is dynamically possible, not as a hardware-safe command ta
 current/torque model must be calibrated on the real robot.
 
 View: `./.venv/bin/python ./.venv/bin/mjpython -m mujoco.viewer --mjcf=model/mjcf/scene_view.xml`
+
+## Firmware model header (kinematics / mass)
+
+`firmware/components/tilt_kinematics` reads its link geometry and masses from a header generated from
+`tilt.urdf`. Regenerate it whenever the URDF changes:
+
+```bash
+python3 model/tools/generate_robot_model.py              # RobotModel.h
+python3 model/tools/generate_robot_model.py --reference  # + MuJoCo ground truth for host tests (needs mujoco)
+```
+
+Base frame of the generated model: torso axes, origin at the midpoint of the two hip points H (where each
+leg's hip-roll and hip-pitch axes intersect). Units: mm, kg, rad.

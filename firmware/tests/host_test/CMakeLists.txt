@@ -35,3 +35,24 @@ add_executable(test_rocking_gait
 target_include_directories(test_rocking_gait PRIVATE
     ../../components/tilt_gait/include
     ../../components/tilt_config/include)
+
+add_executable(test_estimation
+    test_estimation.cpp
+    ../../components/tilt_kinematics/kinematics.cpp
+    ../../components/tilt_estimation/CenterOfMass.cpp
+    ../../components/tilt_estimation/DcmEstimator.cpp)
+
+target_include_directories(test_estimation PRIVATE
+    ../../components/tilt_estimation/include
+    ../../components/tilt_kinematics/include
+    ../../components/tilt_config/include)
+
+add_executable(test_dcm_stepping
+    test_dcm_stepping.cpp
+    ../../components/tilt_dcm_gait/DcmStepping.cpp)
+
+target_include_directories(test_dcm_stepping PRIVATE
+    ../../components/tilt_dcm_gait/include
+    ../../components/tilt_estimation/include
+    ../../components/tilt_kinematics/include
+    ../../components/tilt_config/include)

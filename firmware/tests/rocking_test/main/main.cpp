@@ -26,6 +26,13 @@ constexpr std::int64_t kControlPeriodUs =
 constexpr std::uint32_t kStandTransitionMs = 2000;
 constexpr std::uint32_t kStopTransitionMs = 600;
 constexpr float kEmergencyTiltRad = 35.0f * tilt::DEG2RAD;
+constexpr float kRollEditStepRad = 0.5f * tilt::DEG2RAD;
+constexpr float kLiftEditStepRad = 1.0f * tilt::DEG2RAD;
+constexpr float kLiftEditMinRad = 0.0f;
+constexpr float kLiftEditMaxRad = 20.0f * tilt::DEG2RAD;
+constexpr std::uint32_t kHalfCycleStepMs = 20;
+constexpr std::uint32_t kHalfCycleMinMs = 320;
+constexpr std::uint32_t kHalfCycleMaxMs = 800;
 constexpr std::size_t kJointCount = tilt::NUM_JOINTS;
 
 enum class ControllerState {
@@ -33,6 +40,7 @@ enum class ControllerState {
     kArmedHold,
     kMovingToStand,
     kStanding,
+    kEditingRollPose,
     kRocking,
 };
 
@@ -53,6 +61,8 @@ tilt::sts3215::Sts3215Bus s_bus(makeBusConfig());
 tilt::gait::Preset s_preset = tilt::gait::Preset::kConservative;
 tilt::gait::RockingGait s_gait(
     tilt::gait::parametersForPreset(s_preset));
+tilt::gait::HipRollMode s_hip_roll_mode =
+    tilt::gait::HipRollMode::kPreset;
 tilt::ComplementaryFilter s_imu_filter;
 tilt::Attitude s_attitude{};
 
@@ -66,6 +76,16 @@ std::uint32_t s_overrun_count = 0;
 std::uint32_t s_print_divider = 0;
 tilt::gait::Phase s_last_phase = tilt::gait::Phase::kIdle;
 std::uint64_t s_last_completed_events = 0;
+float s_custom_left_support_left_roll_rad = 0.0f;
+float s_custom_left_support_right_roll_rad = 0.0f;
+float s_edit_left_roll_rad = 0.0f;
+float s_edit_right_roll_rad = 0.0f;
+float s_custom_lift_rad = 0.0f;
+float s_edit_lift_rad = 0.0f;
+bool s_custom_lift_enabled = false;
+std::uint32_t s_custom_half_cycle_ms = 500;
+bool s_custom_half_cycle_enabled = false;
+bool s_custom_pose_saved = false;
 
 JointArray standPose() {
     return {
@@ -84,6 +104,7 @@ const char* stateName(ControllerState state) {
         case ControllerState::kArmedHold: return "ARMED_HOLD";
         case ControllerState::kMovingToStand: return "MOVING_TO_STAND";
         case ControllerState::kStanding: return "STANDING";
+        case ControllerState::kEditingRollPose: return "EDITING_ROLL_POSE";
         case ControllerState::kRocking: return "ROCKING";
     }
     return "UNKNOWN";
@@ -92,6 +113,39 @@ const char* stateName(ControllerState state) {
 const char* presetName() {
     return s_preset == tilt::gait::Preset::kVisualization ? "VISUAL"
                                                           : "CONSERVATIVE";
+}
+
+tilt::gait::RockingParameters configuredGaitParameters() {
+    auto parameters = tilt::gait::parametersForPreset(s_preset);
+    parameters.hip_roll_mode = s_hip_roll_mode;
+    parameters.custom_left_support_left_roll_rad =
+        s_custom_left_support_left_roll_rad;
+    parameters.custom_left_support_right_roll_rad =
+        s_custom_left_support_right_roll_rad;
+    if (s_custom_lift_enabled) {
+        parameters.lift_hip_delta_rad = -s_custom_lift_rad;
+        parameters.lift_knee_delta_rad = +s_custom_lift_rad;
+    }
+    if (s_custom_half_cycle_enabled) {
+        parameters.half_cycle_ms = s_custom_half_cycle_ms;
+    }
+    return parameters;
+}
+
+void applyGaitParameters() {
+    s_gait.setParameters(configuredGaitParameters());
+}
+
+void printRollEditorStatus() {
+    std::printf(
+        "custom LEFT-support pose: LHR=%+.1f deg RHR=%+.1f deg "
+        "right-leg lift=%.1f deg "
+        "| mirrored RIGHT-support: LHR=%+.1f deg RHR=%+.1f deg\n",
+        s_edit_left_roll_rad / tilt::DEG2RAD,
+        s_edit_right_roll_rad / tilt::DEG2RAD,
+        s_edit_lift_rad / tilt::DEG2RAD,
+        -s_edit_right_roll_rad / tilt::DEG2RAD,
+        -s_edit_left_roll_rad / tilt::DEG2RAD);
 }
 
 float smoothstep5(float value) {
@@ -155,12 +209,19 @@ void printHelp() {
     std::printf("  s     move smoothly to stand\n");
     std::printf("  r     start continuous rocking\n");
     std::printf("  x     stop rocking and return to stand\n");
-    std::printf("  1     CONSERVATIVE preset (still unverified on hardware)\n");
-    std::printf("  2     VISUAL preset (2 deg stance, 12 deg swing roll, 14 deg lift; suspended only)\n");
+    std::printf("  1     CONSERVATIVE preset; restore preset lift height\n");
+    std::printf("  2     VISUAL preset; restore preset lift height (suspended only)\n");
+    std::printf("  -/+   half-cycle -/+20 ms (faster/slower, 320..800 ms)\n");
+    std::printf("  m     cycle hip-roll mode: PRESET / PITCH_ONLY / CUSTOM\n");
+    std::printf("  e     edit one custom LEFT-support pose (suspended only)\n");
+    std::printf("        editor: a/d LHR -/+0.5 deg, j/l RHR -/+0.5 deg\n");
+    std::printf("                w/s lift +1/-1 deg (0..20 deg)\n");
+    std::printf("                v save+mirror, q cancel, SPACE torque off\n");
     std::printf("  p     print status\n");
     std::printf("  SPACE emergency stop / torque off\n");
-    std::printf("state=%s preset=%s imu=%s\n\n",
+    std::printf("state=%s preset=%s roll_mode=%s imu=%s\n\n",
                 stateName(s_state), presetName(),
+                tilt::gait::hipRollModeName(s_hip_roll_mode),
                 s_imu_available ? "ready" : "unavailable");
 }
 
@@ -227,16 +288,117 @@ void beginStandTransition(std::uint32_t duration_ms) {
 
 void selectPreset(tilt::gait::Preset preset) {
     if (s_state == ControllerState::kRocking ||
-        s_state == ControllerState::kMovingToStand) {
+        s_state == ControllerState::kMovingToStand ||
+        s_state == ControllerState::kEditingRollPose) {
         std::printf("preset change rejected while moving\n");
         return;
     }
     s_preset = preset;
-    s_gait.setParameters(tilt::gait::parametersForPreset(preset));
-    std::printf("preset=%s%s\n", presetName(),
+    s_custom_lift_enabled = false;
+    s_custom_half_cycle_enabled = false;
+    applyGaitParameters();
+    std::printf("preset=%s, lift height and period restored to preset%s\n",
+                presetName(),
                 preset == tilt::gait::Preset::kVisualization
                     ? " WARNING: use only while suspended"
                     : "");
+}
+
+void adjustHalfCycle(std::int32_t delta_ms) {
+    if (s_state == ControllerState::kRocking ||
+        s_state == ControllerState::kMovingToStand ||
+        s_state == ControllerState::kEditingRollPose) {
+        std::printf("period change rejected while moving\n");
+        return;
+    }
+    const std::int32_t current = static_cast<std::int32_t>(
+        s_gait.parameters().half_cycle_ms);
+    const std::int32_t bounded = std::clamp(
+        current + delta_ms,
+        static_cast<std::int32_t>(kHalfCycleMinMs),
+        static_cast<std::int32_t>(kHalfCycleMaxMs));
+    s_custom_half_cycle_ms = static_cast<std::uint32_t>(bounded);
+    s_custom_half_cycle_enabled = true;
+    applyGaitParameters();
+    std::printf("half-cycle=%lu ms full-cycle=%lu ms%s\n",
+                static_cast<unsigned long>(s_custom_half_cycle_ms),
+                static_cast<unsigned long>(2u * s_custom_half_cycle_ms),
+                s_custom_half_cycle_ms <= 360
+                    ? " WARNING: aggressive; keep robot suspended" : "");
+}
+
+void cycleHipRollMode() {
+    if (s_state == ControllerState::kRocking ||
+        s_state == ControllerState::kMovingToStand ||
+        s_state == ControllerState::kEditingRollPose) {
+        std::printf("hip-roll mode change rejected while moving\n");
+        return;
+    }
+    switch (s_hip_roll_mode) {
+        case tilt::gait::HipRollMode::kPreset:
+            s_hip_roll_mode = tilt::gait::HipRollMode::kDisabled;
+            break;
+        case tilt::gait::HipRollMode::kDisabled:
+            s_hip_roll_mode = tilt::gait::HipRollMode::kCustom;
+            break;
+        case tilt::gait::HipRollMode::kCustom:
+            s_hip_roll_mode = tilt::gait::HipRollMode::kPreset;
+            break;
+    }
+    applyGaitParameters();
+    std::printf("hip-roll mode=%s%s\n",
+                tilt::gait::hipRollModeName(s_hip_roll_mode),
+                s_hip_roll_mode == tilt::gait::HipRollMode::kCustom &&
+                        !s_custom_pose_saved
+                    ? " (custom pose is still zero)" : "");
+}
+
+void enterRollPoseEditor() {
+    if (s_state != ControllerState::kStanding) {
+        std::printf("editor rejected: reach STANDING first\n");
+        return;
+    }
+    // Always enter at zero to avoid an abrupt jump to an older saved pose.
+    s_edit_left_roll_rad = 0.0f;
+    s_edit_right_roll_rad = 0.0f;
+    s_edit_lift_rad = 0.0f;
+    s_state = ControllerState::kEditingRollPose;
+    std::printf("custom pose editor started; keep the robot suspended\n");
+    printRollEditorStatus();
+}
+
+void adjustRollPose(int joint, float delta_rad) {
+    if (s_state != ControllerState::kEditingRollPose) return;
+    const auto& limit = tilt::JOINT_LIMIT[joint / 3][joint % 3];
+    float* value = joint == tilt::L_HIP_ROLL
+        ? &s_edit_left_roll_rad : &s_edit_right_roll_rad;
+    *value = std::clamp(*value + delta_rad,
+                        limit.minimum_rad, limit.maximum_rad);
+    printRollEditorStatus();
+}
+
+void adjustLiftPose(float delta_rad) {
+    if (s_state != ControllerState::kEditingRollPose) return;
+    s_edit_lift_rad = std::clamp(s_edit_lift_rad + delta_rad,
+                                 kLiftEditMinRad, kLiftEditMaxRad);
+    printRollEditorStatus();
+}
+
+void finishRollPoseEditor(bool save) {
+    if (s_state != ControllerState::kEditingRollPose) return;
+    if (save) {
+        s_custom_left_support_left_roll_rad = s_edit_left_roll_rad;
+        s_custom_left_support_right_roll_rad = s_edit_right_roll_rad;
+        s_custom_lift_rad = s_edit_lift_rad;
+        s_custom_lift_enabled = true;
+        s_custom_pose_saved = true;
+        s_hip_roll_mode = tilt::gait::HipRollMode::kCustom;
+        applyGaitParameters();
+        std::printf("custom pose saved in RAM and CUSTOM mode selected\n");
+    } else {
+        std::printf("custom pose edit cancelled\n");
+    }
+    beginStandTransition(kStopTransitionMs);
 }
 
 void startRocking() {
@@ -248,12 +410,19 @@ void startRocking() {
     s_last_phase = tilt::gait::Phase::kIdle;
     s_last_completed_events = 0;
     s_state = ControllerState::kRocking;
-    std::printf("rocking started preset=%s\n", presetName());
+    std::printf("rocking started preset=%s roll_mode=%s half-cycle=%lu ms\n",
+                presetName(),
+                tilt::gait::hipRollModeName(s_hip_roll_mode),
+                static_cast<unsigned long>(s_gait.parameters().half_cycle_ms));
 }
 
 void printStatus() {
-    std::printf("state=%s preset=%s overruns=%lu ",
+    std::printf("state=%s preset=%s roll_mode=%s half-cycle=%lu_ms "
+                "full-cycle=%lu_ms overruns=%lu ",
                 stateName(s_state), presetName(),
+                tilt::gait::hipRollModeName(s_hip_roll_mode),
+                static_cast<unsigned long>(s_gait.parameters().half_cycle_ms),
+                static_cast<unsigned long>(s_gait.cycleDurationMs()),
                 static_cast<unsigned long>(s_overrun_count));
     if (s_imu_available) {
         std::printf("imu_roll=%+.2f imu_pitch=%+.2f ",
@@ -267,6 +436,15 @@ void printStatus() {
                     tilt::gait::sideName(output.support_side),
                     static_cast<unsigned long long>(output.completed_events));
     }
+    if (s_custom_pose_saved) {
+        std::printf(" custom_left_support=(%+.1f,%+.1f)deg custom_lift=%.1fdeg",
+                    s_custom_left_support_left_roll_rad / tilt::DEG2RAD,
+                    s_custom_left_support_right_roll_rad / tilt::DEG2RAD,
+                    s_custom_lift_rad / tilt::DEG2RAD);
+    } else if (s_custom_lift_enabled) {
+        std::printf(" custom_lift=%.1fdeg",
+                    s_custom_lift_rad / tilt::DEG2RAD);
+    }
     std::printf("\n");
 }
 
@@ -276,6 +454,22 @@ void handleInput(std::uint8_t input) {
         return;
     }
     const char key = static_cast<char>(std::tolower(input));
+    if (s_state == ControllerState::kEditingRollPose) {
+        switch (key) {
+            case 'a': adjustRollPose(tilt::L_HIP_ROLL, -kRollEditStepRad); break;
+            case 'd': adjustRollPose(tilt::L_HIP_ROLL, +kRollEditStepRad); break;
+            case 'j': adjustRollPose(tilt::R_HIP_ROLL, -kRollEditStepRad); break;
+            case 'l': adjustRollPose(tilt::R_HIP_ROLL, +kRollEditStepRad); break;
+            case 'w': adjustLiftPose(+kLiftEditStepRad); break;
+            case 's': adjustLiftPose(-kLiftEditStepRad); break;
+            case 'v': finishRollPoseEditor(true); break;
+            case 'q': finishRollPoseEditor(false); break;
+            case 'p': printRollEditorStatus(); break;
+            case '?': printHelp(); break;
+            default: break;
+        }
+        return;
+    }
     switch (key) {
         case 'o': armServos(); break;
         case 's': beginStandTransition(kStandTransitionMs); break;
@@ -283,6 +477,10 @@ void handleInput(std::uint8_t input) {
         case 'x': beginStandTransition(kStopTransitionMs); break;
         case '1': selectPreset(tilt::gait::Preset::kConservative); break;
         case '2': selectPreset(tilt::gait::Preset::kVisualization); break;
+        case '-': adjustHalfCycle(-static_cast<std::int32_t>(kHalfCycleStepMs)); break;
+        case '+': adjustHalfCycle(+static_cast<std::int32_t>(kHalfCycleStepMs)); break;
+        case 'm': cycleHipRollMode(); break;
+        case 'e': enterRollPoseEditor(); break;
         case 'p': printStatus(); break;
         case '?': printHelp(); break;
         default: break;
@@ -317,6 +515,14 @@ void updateCommand() {
             s_state = ControllerState::kStanding;
             std::printf("reached STANDING\n");
         }
+    } else if (s_state == ControllerState::kEditingRollPose) {
+        s_command = standPose();
+        s_command[tilt::L_HIP_ROLL] = s_edit_left_roll_rad;
+        s_command[tilt::R_HIP_ROLL] = s_edit_right_roll_rad;
+        // The saved pose is LEFT support, so preview the right swing leg.
+        // Equal and opposite hip/knee deltas preserve the fixed foot pitch.
+        s_command[tilt::R_HIP_PITCH] -= s_edit_lift_rad;
+        s_command[tilt::R_KNEE_PITCH] += s_edit_lift_rad;
     } else if (s_state == ControllerState::kRocking) {
         const auto output = s_gait.update(kControlPeriodMs);
         s_command = output.position_rad;

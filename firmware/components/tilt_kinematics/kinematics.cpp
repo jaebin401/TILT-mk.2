@@ -74,6 +74,15 @@ float wrap_pi(float angle) {
 
 }  // namespace
 
+Pose base_pose() {
+    return {identity(), {0.0f, 0.0f, 0.0f}};
+}
+
+Pose joint_child_pose(const Pose& parent, const model::JointSpec& joint,
+                      float q) {
+    return apply_joint(parent, joint, q);
+}
+
 Vec3 transform_point(const Pose& pose, const Vec3& local) {
     const float v[3] = {local.x, local.y, local.z};
     const Vec3 r = rotate(pose.R, v);

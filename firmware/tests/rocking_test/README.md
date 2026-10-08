@@ -6,10 +6,10 @@ walking controller.
 
 ## Presets
 
-| Preset | Stance hip roll | Swing hip roll | Swing hip/knee | Cycle |
-|---|---:|---:|---:|---:|
-| `CONSERVATIVE` | left `-1.5°`, right `+1.5°` | left `-8°`, right `+8°` | `-12° / +12°` | 1.78 s |
-| `VISUAL` | left `-2°`, right `+2°` | left `-12°`, right `+12°` | `-14° / +14°` | 1.72 s |
+| Preset | Stance hip roll | Swing hip roll | Swing hip/knee | Half-cycle | Full cycle |
+|---|---:|---:|---:|---:|---:|
+| `CONSERVATIVE` | left `-1.5°`, right `+1.5°` | left `-8°`, right `+8°` | `-14° / +14°` | 500 ms | 1.00 s |
+| `VISUAL` | left `-2°`, right `+2°` | left `-10°`, right `+10°` | `-16° / +16°` | 460 ms | 0.92 s |
 
 The stance and swing hip-roll targets are intentionally asymmetric. The
 loaded hip shifts the torso over the support foot while the unloaded hip tucks
@@ -45,9 +45,17 @@ r       start continuous rocking
 x       stop and return to stand
 1       select CONSERVATIVE preset
 2       select VISUAL preset (suspended robot only)
+-/+     shorten/lengthen half-cycle by 20 ms (320..800 ms)
+m       cycle PRESET / PITCH_ONLY / CUSTOM hip-roll mode
+e       edit custom hip-roll pose and pitch lift height
 p       print status
 SPACE   emergency torque-off
 ```
+
+Period changes are accepted only while the robot is not moving. `-` makes the
+gait faster and `+` makes it slower. Selecting preset `1` or `2` restores that
+preset's default period. Values at or below 360 ms are an aggressive suspended
+test range, not a verified load-bearing command.
 
 Recommended first run: suspend the torso, keep both feet clear of obstacles,
 press `o`, then `s`, select `1`, and finally press `r`. Keep the terminal focused

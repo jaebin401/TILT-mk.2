@@ -20,6 +20,7 @@
 //     is flat (stand pose: hip_pitch + knee_pitch = +20 deg).
 
 #include "tilt_config.h"
+#include "tilt/kinematics/RobotModel.h"
 
 namespace tilt {
 
@@ -72,6 +73,12 @@ IkResult ik_foot(Leg leg, const Vec3& sole_target);
 
 // Transforms a point given in a pose's local frame into B.
 Vec3 transform_point(const Pose& pose, const Vec3& local);
+
+// Identity pose of the base frame B.
+Pose base_pose();
+
+// Applies one generated joint: child = parent * T(origin) * rotation * Rot(axis, q).
+Pose joint_child_pose(const Pose& parent, const model::JointSpec& joint, float q);
 
 // Clamps in place to the logical joint limits for the selected leg.
 bool clamp_to_limits(Leg leg, float theta[3]);

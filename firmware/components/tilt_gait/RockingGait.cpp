@@ -1,14 +1,12 @@
 #include "tilt/gait/RockingGait.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace tilt::gait {
 namespace {
 
-float smoothstep5(float value) {
-    const float s = std::clamp(value, 0.0f, 1.0f);
-    return s * s * s * (10.0f + s * (-15.0f + 6.0f * s));
-}
+constexpr float kPi = 3.14159265358979323846f;
 
 JointArray standPose() {
     return {
@@ -19,10 +17,6 @@ JointArray standPose() {
         -20.0f * DEG2RAD,
         +40.0f * DEG2RAD,
     };
-}
-
-float lerp(float from, float to, float scale) {
-    return from + (to - from) * scale;
 }
 
 Side opposite(Side side) {
@@ -36,16 +30,14 @@ RockingParameters parametersForPreset(Preset preset) {
     if (preset == Preset::kVisualization) {
         parameters.left_stance_roll_rad = -2.0f * DEG2RAD;
         parameters.right_stance_roll_rad = +2.0f * DEG2RAD;
-        parameters.left_swing_roll_rad = -12.0f * DEG2RAD;
-        parameters.right_swing_roll_rad = +12.0f * DEG2RAD;
-        parameters.lift_hip_delta_rad = -14.0f * DEG2RAD;
-        parameters.lift_knee_delta_rad = +14.0f * DEG2RAD;
+        parameters.left_swing_roll_rad = -10.0f * DEG2RAD;
+        parameters.right_swing_roll_rad = +10.0f * DEG2RAD;
+        parameters.lift_hip_delta_rad = -16.0f * DEG2RAD;
+        parameters.lift_knee_delta_rad = +16.0f * DEG2RAD;
         parameters.initial_settle_ms = 1000;
-        parameters.transfer_ms = 350;
-        parameters.lift_ms = 220;
-        parameters.hold_ms = 30;
-        parameters.lower_ms = 220;
-        parameters.touchdown_ms = 40;
+        parameters.half_cycle_ms = 460;
+        parameters.build_rock_halves = 4;
+        parameters.lift_ramp_halves = 2;
     }
     return parameters;
 }
@@ -65,6 +57,15 @@ const char* phaseName(Phase phase) {
 
 const char* sideName(Side side) {
     return side == Side::kLeft ? "LEFT" : "RIGHT";
+}
+
+const char* hipRollModeName(HipRollMode mode) {
+    switch (mode) {
+        case HipRollMode::kPreset: return "PRESET";
+        case HipRollMode::kDisabled: return "PITCH_ONLY";
+        case HipRollMode::kCustom: return "CUSTOM";
+    }
+    return "UNKNOWN";
 }
 
 RockingGait::RockingGait(const RockingParameters& parameters)
@@ -103,9 +104,7 @@ void RockingGait::stop() {
 }
 
 std::uint32_t RockingGait::eventDurationMs() const {
-    return parameters_.transfer_ms + parameters_.lift_ms +
-           parameters_.hold_ms + parameters_.lower_ms +
-           parameters_.touchdown_ms;
+    return parameters_.half_cycle_ms;
 }
 
 void RockingGait::setStandOutput(Phase phase, bool running) {
@@ -123,67 +122,63 @@ RockingOutput RockingGait::sampleEvent(std::uint32_t event_time_ms) const {
     result.completed_events = completed_events_;
     result.running = true;
 
-    const std::uint32_t lift_start = parameters_.transfer_ms;
-    const std::uint32_t lift_top = lift_start + parameters_.lift_ms;
-    const std::uint32_t lift_down = lift_top + parameters_.hold_ms;
-    const std::uint32_t lift_end = lift_down + parameters_.lower_ms;
+    const float phase = parameters_.half_cycle_ms == 0
+        ? 0.0f
+        : std::clamp(static_cast<float>(event_time_ms) /
+                         static_cast<float>(parameters_.half_cycle_ms),
+                     0.0f, 1.0f);
+    // A half sine has no finite DSP window: the old swing foot reaches zero
+    // exactly when the next swing foot starts moving.  At the boundary both
+    // targets are zero for one mathematical instant, but the oscillator does
+    // not stop or restart with zero velocity.
+    const float wave = std::sin(kPi * phase);
 
-    const bool first_event = completed_events_ == 0;
-    const Side previous_support = opposite(support_side_);
-
-    // At touchdown the previous swing hip has returned to neutral while the
-    // previous stance hip is still carrying the torso.  The next transfer
-    // blends directly from that pose to the new stance pose; it never returns
-    // both hips to stand and never inserts a stationary DSP phase.
-    float transfer_from_left = 0.0f;
-    float transfer_from_right = 0.0f;
-    if (!first_event) {
-        if (previous_support == Side::kLeft) {
-            transfer_from_left = parameters_.left_stance_roll_rad;
+    float lift_gain = 0.0f;
+    const std::uint32_t build_halves =
+        parameters_.hip_roll_mode == HipRollMode::kDisabled
+            ? 0u : parameters_.build_rock_halves;
+    if (completed_events_ >= build_halves) {
+        if (parameters_.lift_ramp_halves == 0) {
+            lift_gain = 1.0f;
         } else {
-            transfer_from_right = parameters_.right_stance_roll_rad;
+            const std::uint64_t ramp_half =
+                completed_events_ - build_halves + 1;
+            lift_gain = std::min(
+                1.0f,
+                static_cast<float>(ramp_half) /
+                    static_cast<float>(parameters_.lift_ramp_halves));
         }
     }
-    const float transfer_to_left = support_side_ == Side::kLeft
-        ? parameters_.left_stance_roll_rad
-        : 0.0f;
-    const float transfer_to_right = support_side_ == Side::kRight
-        ? parameters_.right_stance_roll_rad
-        : 0.0f;
+    const float lift_scale = lift_gain * wave;
 
-    float left_roll = transfer_to_left;
-    float right_roll = transfer_to_right;
-    if (event_time_ms < lift_start && parameters_.transfer_ms > 0) {
-        const float transfer_scale = smoothstep5(
-            static_cast<float>(event_time_ms) / parameters_.transfer_ms);
-        left_roll = lerp(transfer_from_left, transfer_to_left, transfer_scale);
-        right_roll = lerp(transfer_from_right, transfer_to_right, transfer_scale);
-    }
-
-    float lift_scale = 0.0f;
-    if (event_time_ms < lift_start) {
+    if (lift_gain == 0.0f) {
         result.phase = Phase::kTransfer;
-    } else if (event_time_ms < lift_top && parameters_.lift_ms > 0) {
+    } else if (phase < 0.5f) {
         result.phase = Phase::kLift;
-        lift_scale = smoothstep5(
-            static_cast<float>(event_time_ms - lift_start) /
-            parameters_.lift_ms);
-    } else if (event_time_ms < lift_down) {
-        result.phase = Phase::kHold;
-        lift_scale = 1.0f;
-    } else if (event_time_ms < lift_end && parameters_.lower_ms > 0) {
-        result.phase = Phase::kLower;
-        lift_scale = 1.0f - smoothstep5(
-            static_cast<float>(event_time_ms - lift_down) /
-            parameters_.lower_ms);
     } else {
-        result.phase = Phase::kTouchdown;
+        result.phase = Phase::kLower;
     }
 
-    if (support_side_ == Side::kLeft) {
-        right_roll += parameters_.right_swing_roll_rad * lift_scale;
-    } else {
-        left_roll += parameters_.left_swing_roll_rad * lift_scale;
+    float left_roll = 0.0f;
+    float right_roll = 0.0f;
+    if (parameters_.hip_roll_mode == HipRollMode::kPreset) {
+        if (support_side_ == Side::kLeft) {
+            left_roll = parameters_.left_stance_roll_rad * wave;
+            right_roll = parameters_.right_swing_roll_rad * lift_gain * wave;
+        } else {
+            left_roll = parameters_.left_swing_roll_rad * lift_gain * wave;
+            right_roll = parameters_.right_stance_roll_rad * wave;
+        }
+    } else if (parameters_.hip_roll_mode == HipRollMode::kCustom) {
+        if (support_side_ == Side::kLeft) {
+            left_roll = parameters_.custom_left_support_left_roll_rad * wave;
+            right_roll = parameters_.custom_left_support_right_roll_rad * wave;
+        } else {
+            left_roll =
+                -parameters_.custom_left_support_right_roll_rad * wave;
+            right_roll =
+                -parameters_.custom_left_support_left_roll_rad * wave;
+        }
     }
     result.position_rad[L_HIP_ROLL] = left_roll;
     result.position_rad[R_HIP_ROLL] = right_roll;
