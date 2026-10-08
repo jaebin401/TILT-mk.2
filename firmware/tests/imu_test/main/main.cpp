@@ -16,8 +16,9 @@ constexpr float kRadiansToDegrees = 57.2957795130823208768f;
 
 void printSample(const tilt::ImuRaw& raw, const tilt::Attitude& attitude) {
     std::printf(
-        "raw a=(%d,%d,%d) g=(%d,%d,%d) | "
-        "roll=%+.2f deg pitch=%+.2f deg yaw=N/A (6-axis IMU)\n",
+        "ACC  x=%4d y=%4d z=%4d | "
+        "GYRO x=%4d y=%4d z=%4d | "
+        "ROLL=%+7.2f deg PITCH=%+7.2f deg | YAW=N/A\n",
         raw.ax,
         raw.ay,
         raw.az,
