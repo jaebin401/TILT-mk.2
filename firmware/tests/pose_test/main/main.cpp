@@ -63,6 +63,11 @@ bool s_armed = false;
 std::uint32_t s_overrun_count = 0;
 bool s_write_error_reported = false;
 
+// Stand tuning (sagittal only, both legs identical).
+constexpr std::uint32_t kTuneMoveMs = 250;
+constexpr float kTuneSteps[] = {0.5f, 1.0f, 0.1f};
+std::size_t s_tune_step_index = 0;
+
 const char* postureName(Posture posture) {
     switch (posture) {
         case Posture::HOME: return "HOME";
@@ -97,6 +102,13 @@ void printHelp() {
     std::printf("  l     : LIFT_L (right support, lift left foot)\n");
     std::printf("  r     : LIFT_R (left support, lift right foot)\n");
     std::printf("  p     : print command/measured status\n");
+    std::printf("  -- stand tuning (from STAND; both legs move together, roll stays 0) --\n");
+    std::printf("  f / b : torso forward / back   (hip pitch +step / -step)\n");
+    std::printf("  k / j : knee bend more / less  (knee pitch +step / -step)\n");
+    std::printf("  z     : step size 0.5 -> 1.0 -> 0.1 deg\n");
+    std::printf("  c     : print the tuned pose as code for standPose()\n");
+    std::printf("  u     : back to the table STAND [0, %+.1f, %+.1f]\n",
+                tilt::pose::kStandHipDeg, tilt::pose::kStandKneeDeg);
     std::printf("  ?     : print this help\n");
     std::printf("  SPACE : emergency stop and torque OFF\n");
     std::printf("armed=%s posture=%s\n\n",
@@ -381,6 +393,99 @@ void printStatus() {
                 radiansToDegrees(tilt::pose::footPitchRad(command, 1)));
 }
 
+// ---------------------------------------------------------------- stand tuning
+bool tuneReady() {
+    if (!s_armed) {
+        std::printf("tune rejected: press 'o' to arm first\n");
+        return false;
+    }
+    if (!s_player.idle()) {
+        std::printf("tune rejected: still moving\n");
+        return false;
+    }
+    if (s_posture != Posture::STAND) {
+        std::printf("tune rejected: reach STAND first ('s')\n");
+        return false;
+    }
+    return true;
+}
+
+// Symmetric sagittal pose: roll 0, the same hip/knee on both legs.
+JointArray symmetricPose(float hip_rad, float knee_rad) {
+    return {0.0f, hip_rad, knee_rad, 0.0f, hip_rad, knee_rad};
+}
+
+void moveTo(const JointArray& target) {
+    int bad_joint = -1;
+    if (!tilt::pose::withinLimits(target, bad_joint)) {
+        std::printf("tune rejected: %s would be outside its limit\n",
+                    tilt::JOINT_NAME[bad_joint]);
+        return;
+    }
+    tilt::pose::Segment segment;
+    segment.target = target;
+    segment.duration_ms = kTuneMoveMs;
+    segment.name = "TUNE";
+    if (!s_player.enqueue(segment)) {
+        std::printf("tune rejected: pose queue is full\n");
+        return;
+    }
+    std::printf("stand tune -> hip %+.1f deg, knee %+.1f deg (foot pitch vs torso %+.1f deg)\n",
+                radiansToDegrees(target[tilt::L_HIP_PITCH]),
+                radiansToDegrees(target[tilt::L_KNEE_PITCH]),
+                radiansToDegrees(tilt::pose::footPitchRad(target, 0)));
+}
+
+void tuneAdjust(float hip_delta_deg, float knee_delta_deg) {
+    if (!tuneReady()) return;
+    const JointArray now = s_player.lastCommand();
+    // Start from the average of both legs so they stay identical.
+    const float hip = 0.5f * (now[tilt::L_HIP_PITCH] + now[tilt::R_HIP_PITCH]) +
+                      hip_delta_deg * tilt::DEG2RAD;
+    const float knee = 0.5f * (now[tilt::L_KNEE_PITCH] + now[tilt::R_KNEE_PITCH]) +
+                       knee_delta_deg * tilt::DEG2RAD;
+    moveTo(symmetricPose(hip, knee));
+}
+
+void tuneReset() {
+    if (!tuneReady()) return;
+    moveTo(tilt::pose::standPose());
+}
+
+void printTunedPose() {
+    const JointArray q = s_player.lastCommand();
+    const float hip = radiansToDegrees(q[tilt::L_HIP_PITCH]);
+    const float knee = radiansToDegrees(q[tilt::L_KNEE_PITCH]);
+
+    std::printf("\n=== tuned stand pose ===\n");
+    std::printf("command : hip %+.2f deg, knee %+.2f deg (both legs), roll 0\n", hip, knee);
+    std::printf("foot pitch vs torso: %+.2f deg  (0 = sole parallel to the torso; with the feet flat,\n"
+                "                     a negative value means the torso is pitched back by that much)\n",
+                radiansToDegrees(tilt::pose::footPitchRad(q, 0)));
+    if (s_player.idle()) {
+        std::printf("measured:");
+        for (int joint = 0; joint < tilt::NUM_JOINTS; ++joint) {
+            std::uint16_t tick = 0;
+            if (s_bus.readPosition(tilt::SERVO_ID[joint], tick) == ESP_OK) {
+                std::printf(" %s=%+.2f", tilt::JOINT_NAME[joint],
+                            radiansToDegrees(tilt::pose::tickToRad(joint, tick)));
+            } else {
+                std::printf(" %s=----", tilt::JOINT_NAME[joint]);
+            }
+            vTaskDelay(pdMS_TO_TICKS(2));
+        }
+        std::printf("\n");
+    }
+    std::printf("\n// firmware/components/tilt_dcm_gait/DcmStepping.cpp\n");
+    std::printf("JointArray standPose() {\n");
+    std::printf("    return {0.0f, %.2ff * DEG2RAD, %.2ff * DEG2RAD,\n", hip, knee);
+    std::printf("            0.0f, %.2ff * DEG2RAD, %.2ff * DEG2RAD};\n", hip, knee);
+    std::printf("}\n");
+    std::printf("\n// firmware/tests/pose_test/main/PoseTable.h\n");
+    std::printf("inline constexpr float kStandHipDeg = %.2ff;\n", hip);
+    std::printf("inline constexpr float kStandKneeDeg = %+.2ff;\n\n", knee);
+}
+
 void handleInput(std::uint8_t input) {
     if (input == ' ') {
         emergencyStop();
@@ -396,6 +501,17 @@ void handleInput(std::uint8_t input) {
         case 'r': queueCommand(PoseCommand::LIFT_R); break;
         case 'p': printStatus(); break;
         case '?': printHelp(); break;
+        case 'f': tuneAdjust(+kTuneSteps[s_tune_step_index], 0.0f); break;
+        case 'b': tuneAdjust(-kTuneSteps[s_tune_step_index], 0.0f); break;
+        case 'k': tuneAdjust(0.0f, +kTuneSteps[s_tune_step_index]); break;
+        case 'j': tuneAdjust(0.0f, -kTuneSteps[s_tune_step_index]); break;
+        case 'z':
+            s_tune_step_index = (s_tune_step_index + 1) %
+                                (sizeof(kTuneSteps) / sizeof(kTuneSteps[0]));
+            std::printf("tune step = %.1f deg\n", kTuneSteps[s_tune_step_index]);
+            break;
+        case 'c': printTunedPose(); break;
+        case 'u': tuneReset(); break;
         default: break;
     }
 }
