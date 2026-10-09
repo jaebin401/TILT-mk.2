@@ -16,8 +16,8 @@ int legIndex(Side side) { return side == Side::kLeft ? 0 : 1; }
 }  // namespace
 
 JointArray standPose() {
-    return {0.0f, -20.0f * DEG2RAD, 40.0f * DEG2RAD,
-            0.0f, -20.0f * DEG2RAD, 40.0f * DEG2RAD};
+    return {0.0f, -19.0f * DEG2RAD, 40.0f * DEG2RAD,
+            0.0f, -19.0f * DEG2RAD, 40.0f * DEG2RAD};
 }
 
 const char* phaseName(Phase phase) {
