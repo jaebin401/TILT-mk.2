@@ -273,9 +273,15 @@ esp_err_t Sts3215Bus::transactForStatusUnlocked(
         const TickType_t remaining = elapsed < timeout_ticks
                                          ? timeout_ticks - elapsed
                                          : 1;
+        // uart_read_bytes() blocks until `length` bytes arrive or the timeout
+        // expires. Ask for one status packet at a time (an echo of the request
+        // on a half-duplex adapter is skipped below) so a reply returns as soon
+        // as it is complete instead of always waiting for the full timeout.
+        const std::size_t want = std::min<std::size_t>(
+            received.size() - received_size, expected_parameter_count + 6);
         const int count = uart_read_bytes(config_.uart_port,
                                           received.data() + received_size,
-                                          received.size() - received_size,
+                                          want,
                                           remaining);
         if (count > 0) {
             received_size += static_cast<std::size_t>(count);

@@ -15,7 +15,11 @@
 //     DOUBLE  : lift the other leg once the DCM has passed the new stance
 //               foot's inner edge by lift_dcm_past_inner_mm (after
 //               double_min_ms). If that does not happen within double_max_ms
-//               the gait stops.
+//               the leg is lifted anyway (timer fallback); after
+//               max_double_fallbacks consecutive fallbacks the gait stops.
+//     first swing: with auto_first_swing, the leg on the side the DCM already
+//               leans toward is lifted first (the lean then helps the body
+//               fall onto that side's partner foot).
 //   Open-loop mode: fixed hold / period (FLASH baseline for comparison).
 //
 // Safety stops: DCM beyond the stance foot's outer edge by abort_outer_mm
@@ -59,6 +63,9 @@ struct Params {
     float touchdown_dcm_inside_mm = 21.0f;  // LIPM b_y at T = 0.2 s.
     std::uint32_t double_min_ms = 20;
     std::uint32_t double_max_ms = 300;
+    std::uint32_t max_double_fallbacks = 3;  // 0 = stop at the first timeout.
+    bool auto_first_swing = false;
+    float auto_first_swing_deadband_mm = 1.0f;
     float lift_dcm_past_inner_mm = 0.0f;
     float abort_outer_mm = 15.0f;
 
@@ -74,6 +81,7 @@ enum class Trigger : std::uint8_t {
     kDcmTouchdown,   // DCM reached the touchdown target.
     kSwingTimeout,   // swing_max_ms reached.
     kDcmLift,        // DCM passed the stance foot's inner edge.
+    kDoubleTimeout,  // double_max_ms reached, lifted anyway.
     kOpenLoopTimer,
     kStop,
 };
@@ -107,7 +115,8 @@ public:
     void setParams(const Params& params) { params_ = params; }
     const Params& params() const { return params_; }
 
-    void start();
+    // state: latest estimator output, used by auto_first_swing (may be null).
+    void start(const DcmState* state = nullptr);
     void stop(StopReason reason = StopReason::kOperator);
     bool running() const { return command_.running; }
 
@@ -125,6 +134,7 @@ private:
     Command command_{};
     Side next_swing_ = Side::kRight;
     bool first_swing_ = true;
+    std::uint32_t consecutive_fallbacks_ = 0;
 };
 
 }  // namespace tilt::dcm_gait

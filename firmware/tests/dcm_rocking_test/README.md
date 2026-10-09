@@ -110,3 +110,30 @@ python3 tools/dcm_log/extract.py path/to/monitor.log
 
 Writes `monitor.csv`, `monitor_events.txt` and `monitor.png` (DCM edge margins with swing phases,
 roll, cycle time).
+
+## Results — 2026-10-08 (first hardware runs)
+
+Settings (now the boot defaults of this app): servo acceleration limit reg85 = reg41 = 254 (written to
+servo RAM at boot), lift 15°, first lift 150 ms, swing 100–240 ms, `touchdown_inside` 16 mm,
+`lift_past_inner` 0 mm, double support 20–300 ms, servo read-back on, IMU map x−1 y−1 z+1 with the
+level calibration in `ImuMounting.h`.
+
+| | slippery floor | carpet |
+|---|---|---|
+| 10 steps | 1.6 s | 3.1 s (≈ 0.31 s per step) |
+| roll amplitude | ±4–5° | **±11–14°** |
+| swing end | DCM touchdown (9/10), 120–160 ms | swing_max 240 ms (8/10) |
+| knee fold reached | 5–9° | 15° (full) |
+| DCM over stance foot (inner edge margin) | rarely | +20–25 mm every swing |
+
+On carpet the robot rocks onto the stance foot during each swing (the swing side is lifted by
+~12° of roll on top of the fold), the touchdown happens at `swing_max` near the roll apex, and the
+DCM lift gate sets the double-support time (40–200 ms) so the rhythm locks to the body's own
+rocking. On the slippery floor the stance foot slides, the body does not pivot over the foot edge,
+the DCM swings back toward the swing foot and the touchdown rule lands it early.
+
+Notes: left swings rock less than right swings (+6…+11° vs −12…−14°) and the left amplitude grew over
+the run; check 20+ step runs before raising `max_steps` further. Sole friction matters more than the
+gains: add rubber/TPU soles before tuning on smooth floors.
+
+`results/2026-10-08_floor_compare.png`: roll, DCM edge margins and knee fold, same settings on both floors.

@@ -36,6 +36,7 @@ const char* triggerName(Trigger trigger) {
         case Trigger::kDcmTouchdown: return "dcm_touchdown";
         case Trigger::kSwingTimeout: return "swing_timeout";
         case Trigger::kDcmLift: return "dcm_lift";
+        case Trigger::kDoubleTimeout: return "double_timeout_lift";
         case Trigger::kOpenLoopTimer: return "timer";
         case Trigger::kStop: return "stop";
     }
@@ -64,11 +65,18 @@ DcmStepping::DcmStepping(const Params& params) : params_(params) {
     command_.position_rad = standPose();
 }
 
-void DcmStepping::start() {
+void DcmStepping::start(const DcmState* state) {
     command_ = Command{};
     command_.running = true;
     first_swing_ = true;
+    consecutive_fallbacks_ = 0;
     next_swing_ = params_.first_swing;
+    if (params_.auto_first_swing && state != nullptr && state->valid) {
+        // In double support the DCM is measured from the midpoint of the soles.
+        const float y = state->dcm_mm[1];
+        if (y > params_.auto_first_swing_deadband_mm) next_swing_ = Side::kLeft;
+        if (y < -params_.auto_first_swing_deadband_mm) next_swing_ = Side::kRight;
+    }
     enterSwing(next_swing_, Trigger::kStart);
 }
 
@@ -167,12 +175,17 @@ const Command& DcmStepping::update(const DcmState& state, std::uint32_t dt_ms) {
     if (command_.phase == Phase::kDouble) {
         // The leg that just landed becomes the stance leg for the next swing.
         const int stance = legIndex(opposite(next_swing_));
-        if (t >= params_.double_max_ms) {
-            finish(StopReason::kDoubleTimeout);
-        } else if (t >= params_.double_min_ms &&
-                   state.dcm_past_inner_edge_mm[stance] >=
-                       params_.lift_dcm_past_inner_mm) {
+        if (t >= params_.double_min_ms &&
+            state.dcm_past_inner_edge_mm[stance] >= params_.lift_dcm_past_inner_mm) {
+            consecutive_fallbacks_ = 0;
             enterSwing(next_swing_, Trigger::kDcmLift);
+        } else if (t >= params_.double_max_ms) {
+            if (consecutive_fallbacks_ >= params_.max_double_fallbacks) {
+                finish(StopReason::kDoubleTimeout);
+            } else {
+                ++consecutive_fallbacks_;
+                enterSwing(next_swing_, Trigger::kDoubleTimeout);
+            }
         }
     }
     return command_;

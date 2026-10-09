@@ -105,13 +105,73 @@ void testDcmTouchdownAndTimeout() {
 
 void testDoubleTimeout() {
     constexpr char kT[] = "G4 double timeout";
-    DcmStepping g;
+    // No fallback allowed: stop at the first timeout.
+    Params p;
+    p.max_double_fallbacks = 0;
+    DcmStepping g(p);
     g.start();
     runFor(g, centred(), 90);
     runFor(g, centred(), 300);
     EXPECT_TRUE(kT, !g.running());
     EXPECT_TRUE(kT, g.command().stop_reason == StopReason::kDoubleTimeout);
     EXPECT_TRUE(kT, std::fabs(g.command().position_rad[tilt::R_KNEE_PITCH] - rad(40.0f)) < 1e-5f);
+}
+
+void testDoubleFallbackLift() {
+    constexpr char kT[] = "G9 double timeout fallback";
+    Params p;
+    p.max_double_fallbacks = 2;
+    DcmStepping g(p);
+    g.start();
+    runFor(g, centred(), 90);    // first swing (R) -> DOUBLE
+    runFor(g, centred(), 300);   // no DCM lift -> fallback lift of L
+    EXPECT_TRUE(kT, g.running() && g.command().phase == Phase::kSwing);
+    EXPECT_TRUE(kT, g.command().swing == Side::kLeft);
+    EXPECT_TRUE(kT, g.command().last_trigger == Trigger::kDoubleTimeout);
+    runFor(g, centred(), 160);   // swing timeout -> DOUBLE
+    runFor(g, centred(), 300);   // second fallback
+    EXPECT_TRUE(kT, g.running() && g.command().swing == Side::kRight);
+    runFor(g, centred(), 160);
+    runFor(g, centred(), 300);   // third consecutive timeout -> stop
+    EXPECT_TRUE(kT, !g.running());
+    EXPECT_TRUE(kT, g.command().stop_reason == StopReason::kDoubleTimeout);
+
+    // A DCM lift resets the fallback counter.
+    DcmStepping h(p);
+    h.start();
+    runFor(h, centred(), 90);
+    runFor(h, centred(), 300);   // fallback 1 (L swing)
+    runFor(h, centred(), 160);   // -> DOUBLE, next swing R, stance L
+    DcmState lift = centred();
+    lift.dcm_past_inner_edge_mm[0] = 1.0f;
+    runFor(h, lift, 20);         // DCM lift resets the counter
+    EXPECT_TRUE(kT, h.command().last_trigger == Trigger::kDcmLift);
+    runFor(h, centred(), 160);
+    runFor(h, centred(), 300);   // fallback 1 again
+    runFor(h, centred(), 160);
+    runFor(h, centred(), 300);   // fallback 2
+    EXPECT_TRUE(kT, h.running());
+}
+
+void testAutoFirstSwing() {
+    constexpr char kT[] = "G10 auto first swing";
+    Params p;
+    p.auto_first_swing = true;
+    DcmState s = centred();
+    s.dcm_mm[1] = 3.0f;  // leaning left
+    DcmStepping g(p);
+    g.start(&s);
+    EXPECT_TRUE(kT, g.command().swing == Side::kLeft);
+    s.dcm_mm[1] = -3.0f;
+    g.start(&s);
+    EXPECT_TRUE(kT, g.command().swing == Side::kRight);
+    s.dcm_mm[1] = 0.5f;  // inside the deadband -> configured first_swing
+    p.first_swing = Side::kLeft;
+    g.setParams(p);
+    g.start(&s);
+    EXPECT_TRUE(kT, g.command().swing == Side::kLeft);
+    g.start(nullptr);
+    EXPECT_TRUE(kT, g.command().swing == Side::kLeft);
 }
 
 void testOuterEdgeAbort() {
@@ -173,6 +233,8 @@ int main() {
     testStepLimit();
     testOpenLoop();
     testInsideDistance();
+    testDoubleFallbackLift();
+    testAutoFirstSwing();
     if (s_failures == 0) {
         std::printf("All DCM stepping tests passed.\n");
         return 0;
