@@ -67,12 +67,12 @@ inline constexpr float DEG_PER_TICK = 360.0f / SERVO_TICKS_PER_REV;
 inline constexpr float RAD_PER_TICK = 6.28318530718f / SERVO_TICKS_PER_REV;
 
 inline constexpr std::uint16_t ZERO_TICK[NUM_JOINTS] = {
-    2062,  // L_HIP_ROLL
-    2036,  // L_HIP_PITCH
-    2125,  // L_KNEE_PITCH
-    2044,  // R_HIP_ROLL
-    2070,  // R_HIP_PITCH
-    2056,  // R_KNEE_PITCH
+    2076,  // L_HIP_ROLL
+    2051,  // L_HIP_PITCH
+    2119,  // L_KNEE_PITCH
+    2050,  // R_HIP_ROLL
+    2051,  // R_HIP_PITCH
+    2049,  // R_KNEE_PITCH
 };
 
 // raw tick 증가 방향이 관절 + 방향과 같으면 +1.
@@ -116,12 +116,12 @@ struct JointLimit {
 // mk.2: roll은 실측 전 임시 ±10°. pitch/knee는 mk.1 실측값 — servo_tool `l`로 재측정 후 교체.
 inline constexpr JointLimit JOINT_LIMIT[2][3] = {
     {
-        {   -13.0f * DEG2RAD,   +17.0f * DEG2RAD },  // L_HIP_ROLL (임시)
+        {   -20.0f * DEG2RAD,   +18.0f * DEG2RAD },  // L_HIP_ROLL (임시)
         {   -92.0f * DEG2RAD,   +20.0f * DEG2RAD },  // L_HIP_PITCH (mk.1)
         {   -85.0f * DEG2RAD,  +76.0f * DEG2RAD },  // L_KNEE_PITCH (mk.1)
     },
     {
-        {   -13.0f * DEG2RAD,   +17.0f * DEG2RAD },  // R_HIP_ROLL (임시)
+        {   -18.0f * DEG2RAD,   +20.0f * DEG2RAD },  // R_HIP_ROLL (임시)
         {   -92.0f * DEG2RAD,   +20.0f * DEG2RAD },  // R_HIP_PITCH (mk.1)
         {   -85.0f * DEG2RAD,  +76.0f * DEG2RAD },  // R_KNEE_PITCH (mk.1)
     },
