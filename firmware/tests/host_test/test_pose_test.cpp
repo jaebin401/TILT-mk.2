@@ -146,6 +146,12 @@ void testPoseLimitsAndFeet() {
                        "liftPose RIGHT support", kTest);
 
     const auto stand = tilt::pose::standPose();
+    for (int joint = 0; joint < tilt::NUM_JOINTS; ++joint) {
+        EXPECT_NEAR(kTest,
+                    stand[joint],
+                    tilt::ZERO_POSE_RAD[joint],
+                    kFloatTolerance);
+    }
     EXPECT_TRUE(kTest,
                 std::fabs(tilt::pose::footPitchRad(stand, 0)) <= rad(0.5f));
     EXPECT_TRUE(kTest,

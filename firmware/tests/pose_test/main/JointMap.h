@@ -53,8 +53,10 @@ inline float footPitchRad(const JointArray& q, int leg) {
     if (leg < 0 || leg > 1) {
         return 0.0f;
     }
-    const int base = leg * NUM_LEG_JOINTS;
-    return q[base + 1] + q[base + 2] + q[base + 3] +
+    const int hip_pitch = jointIndex(leg, 1);
+    const int knee_pitch = jointIndex(leg, 2);
+    const int ankle_pitch = jointIndex(leg, 3);
+    return q[hip_pitch] + q[knee_pitch] + q[ankle_pitch] +
            KNEE_OFFSET_RAD + ANKLE_FIXED_RAD;
 }
 
