@@ -2,8 +2,8 @@
 
 // DCM-gated stepping in place (lateral rocking) for TILT mk.2.
 //
-// Each swing is a FLASH lift: the swing leg's hip pitch and knee are stepped
-// by -lift / +lift at once (no interpolation), which keeps the sole parallel.
+// Each swing is a lift stepped at once (no interpolation) that keeps the sole
+// parallel (hip + knee + ankle pitch unchanged), see LiftMode.
 //
 //   DCM mode (default)
 //     start   : one open-loop lift of the first swing leg (start_hold_ms) to
@@ -42,17 +42,26 @@ enum class Mode : std::uint8_t { kDcm = 0, kOpenLoop = 1 };
 enum class Phase : std::uint8_t { kIdle = 0, kSwing = 1, kDouble = 2 };
 enum class Side : std::uint8_t { kLeft = 0, kRight = 1 };
 
+// How a lift of L folds the swing leg. Both keep the sole parallel.
+//   kFlash    hip -L, knee +L,  ankle 0   : the mk.2 FLASH fold. At the stand pose
+//             the sole moves ~1.0 mm/deg forward and ~0.5 mm/deg up.
+//   kVertical hip -L, knee +2L, ankle -L  : thigh and shank fold symmetrically,
+//             the sole goes straight up (~1.1 mm/deg at the stand pose).
+enum class LiftMode : std::uint8_t { kFlash = 0, kVertical = 1 };
+
 enum class StopReason : std::uint8_t {
     kNone = 0,
     kOperator,
     kStepLimit,
     kDoubleTimeout,
     kOuterEdge,
+    kTilt,  // Set by the application (IMU tilt limit).
 };
 
 struct Params {
     Mode mode = Mode::kDcm;
     float lift_deg = 15.0f;
+    LiftMode lift_mode = LiftMode::kFlash;
     Side first_swing = Side::kRight;
     std::uint32_t max_steps = 0;  // 0 = unlimited.
 
@@ -72,6 +81,9 @@ struct Params {
     // Open-loop mode (FLASH).
     std::uint32_t open_hold_ms = 90;
     std::uint32_t open_period_ms = 200;
+    // Lift timing hint window (see setLiftHint): the lift may move up to this
+    // much earlier / later than the open-loop timer.
+    std::uint32_t lift_hint_window_ms = 60;
 };
 
 // Why the last phase change happened (for logging).
@@ -83,8 +95,12 @@ enum class Trigger : std::uint8_t {
     kDcmLift,        // DCM passed the stance foot's inner edge.
     kDoubleTimeout,  // double_max_ms reached, lifted anyway.
     kOpenLoopTimer,
+    kPhaseSync,      // Open-loop lift moved by the lift hint (rocking phase).
     kStop,
 };
+
+// Lift timing hint for the open-loop double support, from outside (IMU phase).
+enum class LiftHint : std::int8_t { kNone = -1, kWait = 0, kLift = 1 };
 
 struct Command {
     JointArray position_rad{};
@@ -99,7 +115,11 @@ struct Command {
     bool phase_changed = false;  // True on the cycle a phase starts.
 };
 
+// tilt_config ZERO_POSE_RAD: [0, -20, +40, -20] deg per leg, sole flat.
 JointArray standPose();
+// Adds a lift of lift_rad (may be negative) to the swing leg of q.
+void addLift(JointArray& q, Side swing, float lift_rad, LiftMode mode);
+const char* liftModeName(LiftMode mode);
 const char* phaseName(Phase phase);
 const char* triggerName(Trigger trigger);
 const char* stopReasonName(StopReason reason);
@@ -120,6 +140,11 @@ public:
     void stop(StopReason reason = StopReason::kOperator);
     bool running() const { return command_.running; }
 
+    // Open-loop mode: kNone keeps the timer; kLift lifts as soon as the window
+    // opens (timer - lift_hint_window_ms); kWait delays the lift up to
+    // timer + lift_hint_window_ms. Set before every update().
+    void setLiftHint(LiftHint hint) { lift_hint_ = hint; }
+
     // Call once per control cycle with the latest estimator state.
     const Command& update(const DcmState& state, std::uint32_t dt_ms);
     const Command& command() const { return command_; }
@@ -135,6 +160,7 @@ private:
     Side next_swing_ = Side::kRight;
     bool first_swing_ = true;
     std::uint32_t consecutive_fallbacks_ = 0;
+    LiftHint lift_hint_ = LiftHint::kNone;
 };
 
 }  // namespace tilt::dcm_gait

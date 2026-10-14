@@ -16,8 +16,25 @@ int legIndex(Side side) { return side == Side::kLeft ? 0 : 1; }
 }  // namespace
 
 JointArray standPose() {
-    return {0.0f, -19.0f * DEG2RAD, 40.0f * DEG2RAD,
-            0.0f, -19.0f * DEG2RAD, 40.0f * DEG2RAD};
+    JointArray q{};
+    for (int j = 0; j < NUM_JOINTS; ++j) q[j] = ZERO_POSE_RAD[j];
+    return q;
+}
+
+void addLift(JointArray& q, Side swing, float lift_rad, LiftMode mode) {
+    const int base = legIndex(swing) * NUM_LEG_JOINTS;
+    if (mode == LiftMode::kVertical) {
+        q[base + 1] -= lift_rad;         // Thigh forward.
+        q[base + 2] += 2.0f * lift_rad;  // Shank back by the same angle.
+        q[base + 3] -= lift_rad;         // Sole stays parallel.
+    } else {
+        q[base + 1] -= lift_rad;  // Hip pitch forward.
+        q[base + 2] += lift_rad;  // Knee flexes: sole stays parallel.
+    }
+}
+
+const char* liftModeName(LiftMode mode) {
+    return mode == LiftMode::kVertical ? "vertical" : "flash";
 }
 
 const char* phaseName(Phase phase) {
@@ -38,6 +55,7 @@ const char* triggerName(Trigger trigger) {
         case Trigger::kDcmLift: return "dcm_lift";
         case Trigger::kDoubleTimeout: return "double_timeout_lift";
         case Trigger::kOpenLoopTimer: return "timer";
+        case Trigger::kPhaseSync: return "phase_sync";
         case Trigger::kStop: return "stop";
     }
     return "?";
@@ -50,6 +68,7 @@ const char* stopReasonName(StopReason reason) {
         case StopReason::kStepLimit: return "step_limit";
         case StopReason::kDoubleTimeout: return "double_timeout";
         case StopReason::kOuterEdge: return "outer_edge";
+        case StopReason::kTilt: return "tilt";
     }
     return "?";
 }
@@ -126,10 +145,7 @@ void DcmStepping::enterDouble(Trigger trigger) {
 void DcmStepping::writePose() {
     JointArray q = standPose();
     if (command_.phase == Phase::kSwing) {
-        const int base = legIndex(command_.swing) * 3;
-        const float lift = params_.lift_deg * DEG2RAD;
-        q[base + 1] -= lift;  // Hip pitch forward.
-        q[base + 2] += lift;  // Knee flexes: sole stays parallel.
+        addLift(q, command_.swing, params_.lift_deg * DEG2RAD, params_.lift_mode);
     }
     command_.position_rad = q;
 }
@@ -147,7 +163,15 @@ const Command& DcmStepping::update(const DcmState& state, std::uint32_t dt_ms) {
             const std::uint32_t gap = params_.open_period_ms > params_.open_hold_ms
                 ? params_.open_period_ms - params_.open_hold_ms
                 : 0;
-            if (t >= gap) enterSwing(next_swing_, Trigger::kOpenLoopTimer);
+            const std::uint32_t w = params_.lift_hint_window_ms;
+            const std::uint32_t early = gap > w ? gap - w : 0;
+            if (lift_hint_ == LiftHint::kNone) {
+                if (t >= gap) enterSwing(next_swing_, Trigger::kOpenLoopTimer);
+            } else if (lift_hint_ == LiftHint::kLift && t >= early) {
+                enterSwing(next_swing_, Trigger::kPhaseSync);
+            } else if (t >= gap + w) {
+                enterSwing(next_swing_, Trigger::kOpenLoopTimer);
+            }
         }
         return command_;
     }

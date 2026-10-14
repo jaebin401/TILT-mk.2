@@ -18,6 +18,8 @@
 #include "freertos/task.h"
 #include "tilt/config/HardwareConfig.h"
 #include "tilt/dcm_gait/DcmStepping.h"
+#include "tilt/dcm_gait/GaitFeedback.h"
+#include "tilt/dcm_gait/WalkStride.h"
 #include "tilt/estimation/DcmEstimator.h"
 #include "tilt/sts3215/Sts3215Bus.h"
 #include "tilt_config.h"
@@ -66,6 +68,16 @@ tilt::ComplementaryFilter s_filter;
 est::DcmEstimator s_estimator;
 gait::Params s_params;
 gait::DcmStepping s_gait;
+// IMU feedback layers on top of the stepping pattern (see GaitFeedback.h).
+gait::FeedbackParams s_fb_params;
+gait::GaitFeedback s_feedback;
+bool s_single_lift = false;  // 'r' / 'l': no start ramp.
+// Walking: fore-aft foot placement on top of the rocking (see WalkStride.h).
+gait::WalkStride s_walk;
+bool s_walk_stop_pending = false;  // 'x' while walking: slow to 0, then stop.
+float s_walk_saved_target = 0.0f;
+float s_stand_blend = 1.0f;  // Fades the posture trim in during the stand transition.
+bool s_fade_trim = false;    // Only when the transition starts without trim (after arming).
 
 ControllerState s_state = ControllerState::kUnarmed;
 Monitor s_monitor = Monitor::kOff;
@@ -75,7 +87,8 @@ bool s_imu_verified = tilt_dcm_test::kImuVerified;
 bool s_csv = false;
 bool s_readback = true;
 
-JointArray s_command{};
+JointArray s_command{};  // Pattern / stand command (before feedback).
+JointArray s_output{};   // s_command + feedback: what is written to the servos.
 JointArray s_measured{};
 JointArray s_transition_start{};
 std::uint32_t s_transition_elapsed_ms = 0;
@@ -140,6 +153,7 @@ struct RunStats {
     std::uint32_t timeouts = 0;
     std::uint32_t dcm_lifts = 0;
     std::uint32_t fallback_lifts = 0;
+    std::uint32_t phase_lifts = 0;
     std::uint32_t swing_ms_sum = 0;
     std::uint32_t swing_ms_min = 0xFFFFFFFFu;
     std::uint32_t swing_ms_max = 0;
@@ -241,7 +255,7 @@ tilt::ImuRaw applyMounting(const tilt::ImuRaw& in) {
 
 bool withinLimits(const JointArray& command, int& bad_joint) {
     for (int joint = 0; joint < tilt::NUM_JOINTS; ++joint) {
-        const auto& limit = tilt::JOINT_LIMIT[joint / 3][joint % 3];
+        const auto& limit = tilt::jointLimit(joint);
         if (!std::isfinite(command[joint]) || command[joint] < limit.minimum_rad ||
             command[joint] > limit.maximum_rad) {
             bad_joint = joint;
@@ -295,6 +309,52 @@ void printParams() {
         static_cast<unsigned long>(p.open_period_ms));
 }
 
+void printFeedbackParams() {
+    const gait::FeedbackParams& f = s_fb_params;
+    std::printf(
+        "feedback: [1] roll trim %s (gain %.2f) [5] pitch trim %s (gain %.2f -> target %+.1fdeg) max %.0f/%.0fdeg | "
+        "[2] amplitude %s (target %.1fdeg, gain %.2f, max %.0fdeg) | "
+        "[3] damping %s (roll %.3f, pitch %.3f deg per deg/s) | [4] start ramp %lu steps | "
+        "[6] phase sync %s (window +-%lums)\n",
+        f.trim_enabled ? "ON" : "off", static_cast<double>(f.roll_trim_gain),
+        f.pitch_trim_enabled ? "ON" : "off", static_cast<double>(f.pitch_trim_gain), static_cast<double>(f.pitch_target_deg),
+        static_cast<double>(f.roll_trim_max_deg), static_cast<double>(f.pitch_trim_max_deg),
+        f.amp_enabled ? "ON" : "off", static_cast<double>(f.amp_target_deg),
+        static_cast<double>(f.amp_gain), static_cast<double>(f.amp_max_deg),
+        f.damp_enabled ? "ON" : "off", static_cast<double>(f.damp_roll_gain),
+        static_cast<double>(f.damp_pitch_gain), static_cast<unsigned long>(f.ramp_steps),
+        f.phase_sync_enabled ? "ON" : "off",
+        static_cast<unsigned long>(s_params.lift_hint_window_ms));
+}
+
+void printFeedbackState(const char* prefix) {
+    const gait::FeedbackState& f = s_feedback.state();
+    std::printf(
+        "%s trim roll %+.2f pitch %+.2f (applied %+.2f %+.2f) | lift delta L %+.2f R %+.2f | "
+        "last excursion L %.1f R %.1f | cycle mean roll %+.2f pitch %+.2f | phase nom L %s%+.0f R %s%+.0f | "
+        "walk %+.1f/%+.0f mm | cycles %lu%s%s%s%s\n",
+        prefix, static_cast<double>(f.roll_trim_deg), static_cast<double>(f.pitch_trim_deg),
+        static_cast<double>(f.applied_roll_deg), static_cast<double>(f.applied_pitch_deg),
+        static_cast<double>(f.lift_delta_deg[0]), static_cast<double>(f.lift_delta_deg[1]),
+        static_cast<double>(f.excursion_deg[0]), static_cast<double>(f.excursion_deg[1]),
+        static_cast<double>(f.cycle_roll_deg), static_cast<double>(f.cycle_pitch_deg),
+        f.phase_learned[0] ? "" : "?", static_cast<double>(f.phase_nominal_deg[0]),
+        f.phase_learned[1] ? "" : "?", static_cast<double>(f.phase_nominal_deg[1]),
+        static_cast<double>(s_walk.stride_mm()), static_cast<double>(s_walk.params().stride_target_mm),
+        static_cast<unsigned long>(f.cycles), f.last_window_frozen ? " (frozen)" : "",
+        f.rhythm_stable ? " stable" : "",
+        f.roll_trim_saturated ? " !ROLL TRIM SATURATED" : "",
+        f.pitch_trim_saturated ? " !PITCH TRIM SATURATED" : "");
+}
+
+// Pushes the operator's feedback settings into the controller (the start ramp
+// is skipped for single lifts).
+void applyFeedbackParams() {
+    gait::FeedbackParams p = s_fb_params;
+    if (s_single_lift) p.ramp_steps = 0;
+    s_feedback.setParams(p);
+}
+
 void printImuMap() {
     std::printf("IMU map: swap_xy=%s sign x=%+d y=%+d z=%+d  verified=%s\n",
                 s_imu_map.swap_xy ? "true" : "false", s_imu_map.sign[0],
@@ -326,10 +386,17 @@ void printHelp() {
     std::printf("  ; / '  lift_past_inner -+1mm , / .  open-loop period -+10ms\n");
     std::printf("  { / }  lift hold -+10ms (open-loop hold and DCM first lift)\n");
     std::printf("  n / m  max_steps -+2 (0 = unlimited)\n");
+    std::printf("  IMU feedback (live): 1 roll trim  5 pitch trim  2 amplitude  3 damping  4 start ramp  6 phase sync\n");
+    std::printf("  w  phase sync window 20/30/40/60 ms (not while stepping)\n");
+    std::printf("  F / B  walk stride +-2 mm (live, ramps at 4 mm/s; x while walking = slow down, x again = stop)\n");
+    std::printf("  g  feedback state   0  reset learned trim/lift (not while stepping)\n");
+    std::printf("  u / j  pitch target +-0.5deg   t / y  amplitude target +-0.5deg\n");
+    std::printf("  q / a  damping pitch gain +-0.01   Q / z  damping roll gain +-0.005\n");
     std::printf("state=%s imu=%s readback=%s\n", stateName(s_state),
                 s_imu_available ? "ready" : "unavailable", s_readback ? "on" : "off");
     printImuMap();
     printParams();
+    printFeedbackParams();
     std::printf("\n");
 }
 
@@ -349,10 +416,12 @@ void printStatus() {
 void printCsvHeader() {
     std::printf(
         "CSV,t_ms,state,phase,swing,steps,support,"
-        "cmd_LHR,cmd_LHP,cmd_LKP,cmd_RHR,cmd_RHP,cmd_RKP,"
-        "meas_LHR,meas_LHP,meas_LKP,meas_RHR,meas_RHP,meas_RKP,"
+        "cmd_LHR,cmd_LHP,cmd_LKP,cmd_LAP,cmd_RHR,cmd_RHP,cmd_RKP,cmd_RAP,"
+        "meas_LHR,meas_LHP,meas_LKP,meas_LAP,meas_RHR,meas_RHP,meas_RKP,meas_RAP,"
         "roll,pitch,gx,gy,gz,com_x,com_y,com_z,vel_y,dcm_x,dcm_y,"
-        "inner_L,inner_R,outer_L,outer_R,inside_swing,cycle_us,readback_us\n");
+        "inner_L,inner_R,outer_L,outer_R,inside_swing,cycle_us,readback_us,"
+        "fb_roll_trim,fb_pitch_trim,fb_lift_L,fb_lift_R,fb_damp_roll,fb_damp_pitch,"
+        "walk_stride,foot_x_L,foot_x_R\n");
 }
 
 void printCsvRow() {
@@ -365,7 +434,7 @@ void printCsvRow() {
     std::printf("CSV,%lld,%d,%s,%s,%lu,%s", t_ms, static_cast<int>(s_state),
                 gait::phaseName(g.phase), g.swing == gait::Side::kLeft ? "L" : "R",
                 static_cast<unsigned long>(g.steps), supportName(s.support));
-    for (std::size_t j = 0; j < kJointCount; ++j) std::printf(",%.2f", s_command[j] * kRadToDeg);
+    for (std::size_t j = 0; j < kJointCount; ++j) std::printf(",%.2f", s_output[j] * kRadToDeg);
     for (std::size_t j = 0; j < kJointCount; ++j) {
         if (s_readback) {
             std::printf(",%.2f", s_measured[j] * kRadToDeg);
@@ -380,10 +449,18 @@ void printCsvRow() {
                 s_imu_sample.gyro_rad_s[2] * kRadToDeg);
     std::printf(",%.1f,%.1f,%.1f,%.0f,%.1f,%.1f", s.com_mm.x, s.com_mm.y, s.com_mm.z,
                 s.com_velocity_mm_s.y, s.dcm_mm[0], s.dcm_mm[1]);
-    std::printf(",%.1f,%.1f,%.1f,%.1f,%.1f,%lld,%lld\n", s.dcm_past_inner_edge_mm[0],
+    std::printf(",%.1f,%.1f,%.1f,%.1f,%.1f,%lld,%lld", s.dcm_past_inner_edge_mm[0],
                 s.dcm_past_inner_edge_mm[1], s.dcm_past_outer_edge_mm[0],
                 s.dcm_past_outer_edge_mm[1], inside, static_cast<long long>(s_cycle_us),
                 static_cast<long long>(s_readback_us));
+    const gait::FeedbackState& f = s_feedback.state();
+    const float lift_l = g.phase == gait::Phase::kSwing && g.swing == gait::Side::kLeft
+        ? s_feedback.extraLiftDeg(g, s_gait.params().lift_deg) : 0.0f;
+    const float lift_r = g.phase == gait::Phase::kSwing && g.swing == gait::Side::kRight
+        ? s_feedback.extraLiftDeg(g, s_gait.params().lift_deg) : 0.0f;
+    std::printf(",%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.1f\n", f.applied_roll_deg,
+                f.applied_pitch_deg, lift_l, lift_r, f.damp_roll_deg, f.damp_pitch_deg,
+                s_walk.stride_mm(), s_walk.foot_x_mm(0), s_walk.foot_x_mm(1));
 }
 
 void printMonitor() {
@@ -418,6 +495,9 @@ void printEvent(const gait::Command& g) {
         g.phase == gait::Phase::kSwing ? (g.swing == gait::Side::kLeft ? "(L)" : "(R)") : "",
         gait::triggerName(g.last_trigger), s.dcm_mm[1], s.dcm_past_inner_edge_mm[0],
         s.dcm_past_inner_edge_mm[1], s_imu_sample.roll_rad * kRadToDeg);
+    if (g.phase == gait::Phase::kSwing && g.running) {
+        std::printf(" ph=%+.0f", static_cast<double>(s_feedback.phaseDeg(g.swing)));
+    }
     if (!g.running) std::printf(" STOP=%s", gait::stopReasonName(g.stop_reason));
     std::printf("\n");
 }
@@ -427,7 +507,7 @@ void printRunSummary(const gait::Command& g) {
         static_cast<float>(esp_timer_get_time() - s_run.start_us) / 1.0e6f;
     std::printf(
         "\n== run: %s, %lu steps in %.2f s, stop=%s | swings %lu (dcm touchdown %lu, "
-        "timeout %lu) lifts (dcm %lu, timer fallback %lu) swing ms min/avg/max %lu/%lu/%lu | max |roll| %.1f deg | "
+        "timeout %lu) lifts (dcm %lu, timer fallback %lu, phase sync %lu) swing ms min/avg/max %lu/%lu/%lu | max |roll| %.1f deg | "
         "overruns %lu readback failures %lu ==\n\n",
         s_gait.params().mode == gait::Mode::kDcm ? "DCM" : "OPEN-LOOP",
         static_cast<unsigned long>(g.steps), seconds, gait::stopReasonName(g.stop_reason),
@@ -436,11 +516,14 @@ void printRunSummary(const gait::Command& g) {
         static_cast<unsigned long>(s_run.timeouts),
         static_cast<unsigned long>(s_run.dcm_lifts),
         static_cast<unsigned long>(s_run.fallback_lifts),
+        static_cast<unsigned long>(s_run.phase_lifts),
         static_cast<unsigned long>(s_run.swings ? s_run.swing_ms_min : 0),
         static_cast<unsigned long>(s_run.swings ? s_run.swing_ms_sum / s_run.swings : 0),
         static_cast<unsigned long>(s_run.swing_ms_max), s_run.max_abs_roll * kRadToDeg,
         static_cast<unsigned long>(s_overruns),
         static_cast<unsigned long>(s_readback_failures));
+    printFeedbackState("== feedback:");
+    std::printf("\n");
 }
 
 // ---------------------------------------------------------------- actions
@@ -460,7 +543,7 @@ bool readJoints(JointArray& out) {
         if (s_bus.readPosition(tilt::SERVO_ID[j], tick) == ESP_OK) {
             out[j] = tickToRad(static_cast<int>(j), tick);
         } else {
-            out[j] = s_command[j];
+            out[j] = s_output[j];
             all_ok = false;
         }
     }
@@ -494,6 +577,7 @@ void armServos() {
         return;
     }
     s_command = measured;
+    s_output = measured;
     s_measured = measured;
     s_estimator.reset(measured.data());
     s_state = ControllerState::kArmedHold;
@@ -506,6 +590,7 @@ void beginStand() {
         return;
     }
     if (s_state == ControllerState::kStepping) s_gait.stop();
+    s_fade_trim = s_state == ControllerState::kArmedHold;
     s_transition_start = s_command;
     s_transition_elapsed_ms = 0;
     s_state = ControllerState::kMovingToStand;
@@ -531,6 +616,14 @@ void startStepping(gait::Mode mode, std::uint32_t max_steps_override,
     if (mode != gait::Mode::kDcm) p.auto_first_swing = false;  // r / l / f keep their side.
     if (max_steps_override > 0) p.max_steps = max_steps_override;
     s_gait.setParams(p);
+    s_single_lift = max_steps_override == 1;
+    // Every run starts in place: a stride left over from the last run made the
+    // start-up rocking fall over (2026-10-09). F / B change it once it rocks.
+    s_walk.params().stride_target_mm = s_walk.params().stride_in_place_mm;
+    s_walk_stop_pending = false;
+    s_walk.reset();
+    applyFeedbackParams();
+    s_feedback.beginRun();
     s_run = RunStats{};
     s_run.start_us = esp_timer_get_time();
     s_gait.start(&s_estimator.state());
@@ -541,6 +634,10 @@ void startStepping(gait::Mode mode, std::uint32_t max_steps_override,
                 s_gait.command().swing == gait::Side::kLeft ? "L" : "R",
                 p.auto_first_swing ? " (auto)" : "",
                 static_cast<unsigned long>(p.max_steps));
+    printFeedbackParams();
+    printFeedbackState("FB start:");
+    std::printf("walk: start in place at stride %+.0f mm, F / B to change\n",
+                static_cast<double>(s_walk.params().stride_target_mm));
     printEvent(s_gait.command());
 }
 
@@ -700,6 +797,25 @@ void adjustPeriod(int delta_ms) {
     printParams();
 }
 
+void adjustFeedback(float& value, float delta, float low, float high) {
+    value = std::clamp(value + delta, low, high);
+    applyFeedbackParams();
+    printFeedbackParams();
+}
+
+void stopSteppingNow() {
+    s_gait.stop();
+    s_command = s_gait.command().position_rad;  // Back to stand.
+    printEvent(s_gait.command());
+    printRunSummary(s_gait.command());
+    s_state = ControllerState::kStanding;
+    if (s_walk_stop_pending) {
+        s_walk.params().stride_target_mm = s_walk_saved_target;  // Kept for the next run.
+        s_walk_stop_pending = false;
+    }
+    s_walk.reset();
+}
+
 void handleInput(std::uint8_t input) {
     if (input == ' ') {
         emergencyStop("operator request");
@@ -710,14 +826,28 @@ void handleInput(std::uint8_t input) {
         case 'o': armServos(); break;
         case 's': beginStand(); break;
         case 'x':
-            if (s_state == ControllerState::kStepping) {
-                s_gait.stop();
-                s_command = s_gait.command().position_rad;  // Back to stand.
-                printEvent(s_gait.command());
-                printRunSummary(s_gait.command());
-                s_state = ControllerState::kStanding;
+            if (s_state != ControllerState::kStepping) break;
+            if (!s_walk_stop_pending && std::fabs(s_walk.stride_mm()) > 0.5f) {
+                // Walking: ramp the stride to 0 first (x again = stop now).
+                s_walk_saved_target = s_walk.params().stride_target_mm;
+                s_walk.params().stride_target_mm = 0.0f;
+                s_walk_stop_pending = true;
+                std::printf("walk: slowing to a stop (stride %+.1f mm), 'x' again = stop now\n",
+                            static_cast<double>(s_walk.stride_mm()));
+                break;
             }
+            stopSteppingNow();
             break;
+        case 'F':
+        case 'B': {
+            float& target = s_walk_stop_pending ? s_walk_saved_target : s_walk.params().stride_target_mm;
+            target = std::clamp(target + (input == 'F' ? 2.0f : -2.0f), -s_walk.params().stride_max_mm,
+                                s_walk.params().stride_max_mm);
+            std::printf("walk stride target %+.0f mm (now %+.1f mm, ramp %.0f mm/s)\n",
+                        static_cast<double>(target), static_cast<double>(s_walk.stride_mm()),
+                        static_cast<double>(s_walk.params().ramp_mm_s));
+            break;
+        }
         case 'p': printStatus(); break;
         case 'v': printParams(); printImuMap(); break;
         case '?': case 'h': printHelp(); break;
@@ -810,6 +940,37 @@ void handleInput(std::uint8_t input) {
             p.max_steps = std::min<std::uint32_t>(p.max_steps + 2, 100);
             printParams();
             break;
+        // ---- IMU feedback (live; settings apply from the next control cycle).
+        case '1': s_fb_params.trim_enabled = !s_fb_params.trim_enabled; applyFeedbackParams(); printFeedbackParams(); break;
+        case '2': s_fb_params.amp_enabled = !s_fb_params.amp_enabled; applyFeedbackParams(); printFeedbackParams(); break;
+        case '3': s_fb_params.damp_enabled = !s_fb_params.damp_enabled; applyFeedbackParams(); printFeedbackParams(); break;
+        case 'w': {
+            if (!idleForEdit()) break;
+            static constexpr std::uint32_t kWindows[] = {20, 30, 40, 60};
+            std::size_t k = 0;
+            while (k < 4 && kWindows[k] != s_params.lift_hint_window_ms) ++k;
+            s_params.lift_hint_window_ms = kWindows[(k + 1) % 4];
+            s_gait.setParams(s_params);
+            printFeedbackParams();
+            break;
+        }
+        case '6': s_fb_params.phase_sync_enabled = !s_fb_params.phase_sync_enabled; applyFeedbackParams(); printFeedbackParams(); break;
+        case '5': s_fb_params.pitch_trim_enabled = !s_fb_params.pitch_trim_enabled; applyFeedbackParams(); printFeedbackParams(); break;
+        case '4': s_fb_params.ramp_steps = s_fb_params.ramp_steps > 0 ? 0 : 3; applyFeedbackParams(); printFeedbackParams(); break;
+        case '0':
+            if (!idleForEdit()) break;
+            s_feedback.reset();
+            printFeedbackState("FB reset:");
+            break;
+        case 'g': printFeedbackParams(); printFeedbackState("FB:"); break;
+        case 'u': adjustFeedback(s_fb_params.pitch_target_deg, 0.5f, -8.0f, 12.0f); break;
+        case 'j': adjustFeedback(s_fb_params.pitch_target_deg, -0.5f, -8.0f, 12.0f); break;
+        case 't': adjustFeedback(s_fb_params.amp_target_deg, 0.5f, 2.0f, 12.0f); break;
+        case 'y': adjustFeedback(s_fb_params.amp_target_deg, -0.5f, 2.0f, 12.0f); break;
+        case 'q': adjustFeedback(s_fb_params.damp_pitch_gain, 0.01f, 0.0f, 0.1f); break;
+        case 'a': adjustFeedback(s_fb_params.damp_pitch_gain, -0.01f, 0.0f, 0.1f); break;
+        case 'Q': adjustFeedback(s_fb_params.damp_roll_gain, 0.005f, 0.0f, 0.05f); break;
+        case 'z': adjustFeedback(s_fb_params.damp_roll_gain, -0.005f, 0.0f, 0.05f); break;
         default: break;
     }
 }
@@ -890,6 +1051,7 @@ void recordGaitEvent(const gait::Command& g) {
         s_swing_start_us = esp_timer_get_time();
         if (g.last_trigger == gait::Trigger::kDcmLift) ++s_run.dcm_lifts;
         if (g.last_trigger == gait::Trigger::kDoubleTimeout) ++s_run.fallback_lifts;
+        if (g.last_trigger == gait::Trigger::kPhaseSync) ++s_run.phase_lifts;
     }
 }
 
@@ -899,6 +1061,7 @@ void updateCommand() {
                                            kStandTransitionMs);
         const float blend = smoothstep5(static_cast<float>(s_transition_elapsed_ms) /
                                         static_cast<float>(kStandTransitionMs));
+        s_stand_blend = s_fade_trim ? blend : 1.0f;
         const JointArray stand = standPose();
         for (std::size_t j = 0; j < kJointCount; ++j) {
             s_command[j] = s_transition_start[j] + (stand[j] - s_transition_start[j]) * blend;
@@ -910,6 +1073,7 @@ void updateCommand() {
     } else if (s_state == ControllerState::kStepTest) {
         updateStepTest();
     } else if (s_state == ControllerState::kStepping) {
+        s_gait.setLiftHint(s_feedback.liftHint(s_gait.command()));  // Layer 0 (open loop).
         const gait::Command& g = s_gait.update(s_estimator.state(), kControlPeriodMs);
         s_command = g.position_rad;
         if (g.phase_changed) {
@@ -924,15 +1088,53 @@ void updateCommand() {
     }
 }
 
+// s_output = s_command + feedback. Posture trim in stand / stand transition /
+// stepping; damping and lift changes only while stepping.
+void updateFeedbackAndOutput() {
+    const bool stepping = s_state == ControllerState::kStepping;
+    const gait::Command& g = s_gait.command();
+    s_feedback.update(g, stepping, s_imu_sample.roll_rad, s_imu_sample.pitch_rad,
+                      s_imu_sample.gyro_rad_s[0], s_imu_sample.gyro_rad_s[1], kDt);
+    s_output = s_command;
+    const float lift = s_gait.params().lift_deg;
+    switch (s_state) {
+        case ControllerState::kStepping:
+            s_feedback.apply(s_output, g, gait::FeedbackContext::kStepping, lift);
+            s_walk.update(g, s_gait.params(), kControlPeriodMs);
+            s_walk.apply(s_output);
+            break;
+        case ControllerState::kStanding:
+            s_feedback.apply(s_output, g, gait::FeedbackContext::kStand, lift);
+            break;
+        case ControllerState::kMovingToStand:
+            s_feedback.apply(s_output, g, gait::FeedbackContext::kStand, lift, s_stand_blend);
+            break;
+        default: break;
+    }
+    if (!stepping) {
+        s_walk.reset();
+        if (s_walk_stop_pending) {  // Stopped some other way (tilt, E-stop).
+            s_walk.params().stride_target_mm = s_walk_saved_target;
+            s_walk_stop_pending = false;
+        }
+    }
+    if (stepping && s_feedback.state().cycle_done) printFeedbackState("FB");
+    // Graceful stop after walking: stride back to ~0, then stop in double support.
+    if (stepping && s_walk_stop_pending && std::fabs(s_walk.stride_mm()) < 0.3f &&
+        g.phase == gait::Phase::kDouble) {
+        stopSteppingNow();
+    }
+}
+
 void writeCommand() {
     std::array<std::uint16_t, kJointCount> ticks{};
     int bad_joint = -1;
-    if (!withinLimits(s_command, bad_joint)) {
+    if (!withinLimits(s_output, bad_joint)) {
         emergencyStop(bad_joint >= 0 ? tilt::JOINT_NAME[bad_joint] : "invalid command");
         return;
     }
     for (std::size_t j = 0; j < kJointCount; ++j) {
-        if (!radToTick(static_cast<int>(j), s_command[j], ticks[j])) {
+        if (!radToTick(static_cast<int>(j), s_output[j], ticks[j])) {
             emergencyStop(tilt::JOINT_NAME[j]);
             return;
         }
@@ -958,10 +1160,12 @@ void controlTask(void*) {
             if (tilt_rad > kEmergencyTiltRad) {
                 emergencyStop("IMU tilt > 35 deg");
             } else if (s_state == ControllerState::kStepping && tilt_rad > kGaitStopTiltRad) {
-                s_gait.stop();
+                s_gait.stop(gait::StopReason::kTilt);
+                s_feedback.revertToLastGood();  // Do not start the next run with what the fall taught.
                 s_command = s_gait.command().position_rad;  // Back to stand.
                 std::printf("gait stopped: IMU tilt > 20 deg\n");
                 printRunSummary(s_gait.command());
+                printFeedbackState("FB reverted to last settled values:");
                 s_state = ControllerState::kStanding;
             }
         }
@@ -985,10 +1189,11 @@ void controlTask(void*) {
             const est::Support support = s_state == ControllerState::kStepping
                 ? s_gait.command().support
                 : est::Support::kDouble;
-            s_estimator.update(s_readback ? s_measured.data() : s_command.data(),
+            s_estimator.update(s_readback ? s_measured.data() : s_output.data(),
                                s_imu_sample, support, kDt);
-            // 3. Gait / stand transition, then write.
+            // 3. Gait / stand transition, IMU feedback on top, then write.
             updateCommand();
+            updateFeedbackAndOutput();
             if (s_state != ControllerState::kUnarmed) writeCommand();
         } else if (s_monitor == Monitor::kEstimator) {
             // Unarmed: run the estimator on read-back angles so it can be checked by hand.
@@ -1024,6 +1229,7 @@ void initializeServos() {
 extern "C" void app_main() {
     s_boot_us = esp_timer_get_time();
     s_command = standPose();
+    s_output = standPose();
     s_measured = standPose();
     updateMountRotation();
     s_params.max_steps = 0;  // Unlimited: rock until 'x' / SPACE (or a safety stop).
@@ -1040,7 +1246,10 @@ extern "C" void app_main() {
     // and keep stepping on a timer if the DCM lift gate is missed (max 3 in a row).
     s_params.auto_first_swing = true;
     s_params.max_double_fallbacks = 3;
+    // Phase sync (layer 0) may move the open-loop lift by at most this much.
+    s_params.lift_hint_window_ms = 40;
     s_gait.setParams(s_params);
+    applyFeedbackParams();
     configureEstimator();
 
     if (s_bus.initialize() != ESP_OK) {

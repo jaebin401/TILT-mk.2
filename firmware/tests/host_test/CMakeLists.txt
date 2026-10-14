@@ -56,3 +56,26 @@ target_include_directories(test_dcm_stepping PRIVATE
     ../../components/tilt_estimation/include
     ../../components/tilt_kinematics/include
     ../../components/tilt_config/include)
+
+add_executable(test_gait_feedback
+    test_gait_feedback.cpp
+    ../../components/tilt_dcm_gait/DcmStepping.cpp
+    ../../components/tilt_dcm_gait/GaitFeedback.cpp)
+
+target_include_directories(test_gait_feedback PRIVATE
+    ../../components/tilt_dcm_gait/include
+    ../../components/tilt_estimation/include
+    ../../components/tilt_kinematics/include
+    ../../components/tilt_config/include)
+
+add_executable(test_walk_stride
+    test_walk_stride.cpp
+    ../../components/tilt_dcm_gait/DcmStepping.cpp
+    ../../components/tilt_dcm_gait/WalkStride.cpp
+    ../../components/tilt_kinematics/kinematics.cpp)
+
+target_include_directories(test_walk_stride PRIVATE
+    ../../components/tilt_dcm_gait/include
+    ../../components/tilt_estimation/include
+    ../../components/tilt_kinematics/include
+    ../../components/tilt_config/include)
