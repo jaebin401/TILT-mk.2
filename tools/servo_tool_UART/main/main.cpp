@@ -101,9 +101,9 @@ static int8_t   s_sign[NUM_JOINTS];
 // 조그 중 추적하는 목표 위치(절대 점프 방지용)
 static uint16_t s_cur[NUM_JOINTS];
 
-// 가동범위 탐색 결과
-static uint16_t s_range_min[NUM_JOINTS];
-static uint16_t s_range_max[NUM_JOINTS];
+// 관절 제한 [deg] — [j][0] = 최소(−쪽), [j][1] = 최대(+쪽). config JOINT_LIMIT 값으로 시작.
+static float s_lim_deg[NUM_JOINTS][2];
+static bool  s_lim_new[NUM_JOINTS][2];   // 이번 세션에서 새로 확정했는지
 
 static bool s_coarse = false;   // false = FINE(1 tick), true = COARSE
 static bool s_boot_torque_on = false;  // 부팅 시 토크 ON 성공 여부 (메뉴 t 토글 초기값)
@@ -164,24 +164,41 @@ static void nvs_init_once() {
     }
 }
 
-static void nvs_load_scratch() {
+// apply = false: 부팅 시 — config 와 다른 스크래치가 있는지 알리기만 한다.
+// apply = true : 메뉴 r — 스크래치를 작업값으로 불러온다.
+// (예전에는 부팅 때 자동으로 덮어써서, config 를 고쳐도 툴은 옛 영점을 쓰는 문제가 있었다)
+static void nvs_load_scratch(bool apply) {
     nvs_handle_t h;
-    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        if (apply) printf(">> NVS 스크래치가 없습니다.\n");
+        return;
+    }
 
-    // 크기가 맞을 때만 반영 (임시 버퍼에 먼저 읽어서 config 값을 망가뜨리지 않음)
     uint16_t zero[NUM_JOINTS];
     int8_t sign[NUM_JOINTS];
     size_t sz = sizeof(zero);
-    if (nvs_get_blob(h, NVS_KEY_ZERO, zero, &sz) == ESP_OK && sz == sizeof(zero)) {
-        memcpy(s_zero, zero, sizeof(zero));
-        printf("[NVS] 임시 저장된 ZERO_TICK(8관절) 을 불러왔습니다 (config 값이 아님).\n");
-    }
+    const bool has_zero = nvs_get_blob(h, NVS_KEY_ZERO, zero, &sz) == ESP_OK && sz == sizeof(zero);
     sz = sizeof(sign);
-    if (nvs_get_blob(h, NVS_KEY_SIGN, sign, &sz) == ESP_OK && sz == sizeof(sign)) {
-        memcpy(s_sign, sign, sizeof(sign));
-        printf("[NVS] 임시 저장된 JOINT_SIGN(8관절) 을 불러왔습니다 (config 값이 아님).\n");
-    }
+    const bool has_sign = nvs_get_blob(h, NVS_KEY_SIGN, sign, &sz) == ESP_OK && sz == sizeof(sign);
     nvs_close(h);
+
+    if (!has_zero && !has_sign) {
+        if (apply) printf(">> NVS 스크래치가 없습니다.\n");
+        return;
+    }
+    if (apply) {
+        if (has_zero) memcpy(s_zero, zero, sizeof(zero));
+        if (has_sign) memcpy(s_sign, sign, sizeof(sign));
+        printf(">> NVS 스크래치를 작업값으로 불러왔습니다 (config 값이 아님).\n");
+        printf("   h / u 이동은 여전히 tilt_config.h 값을 기준으로 합니다.\n");
+        return;
+    }
+    const bool differs = (has_zero && memcmp(zero, ZERO_TICK, sizeof(zero)) != 0) ||
+                         (has_sign && memcmp(sign, JOINT_SIGN, sizeof(sign)) != 0);
+    if (differs) {
+        printf("[NVS] tilt_config.h 와 다른 임시 저장값이 있습니다 — 지금은 config 값을 씁니다.\n");
+        printf("      이어서 작업하려면 r (스크래치 불러오기), 필요 없으면 c (비우기).\n");
+    }
 }
 
 static void nvs_save_scratch() {
@@ -202,7 +219,7 @@ static void nvs_clear_scratch() {
     nvs_erase_all(h);
     nvs_commit(h);
     nvs_close(h);
-    printf(">> NVS 스크래치를 비웠습니다. 다음 부팅부터 config 값을 씁니다.\n");
+    printf(">> NVS 스크래치를 비웠습니다.\n");
 }
 
 // ── 출력: 붙여넣기용 C 코드 ──────────────────────────────────────────
@@ -224,25 +241,33 @@ static void print_sign_array() {
     printf("};\n\n");
 }
 
-static void range_deg(int j, float* lo, float* hi) {
-    const float a = tick_to_dh_deg(j, s_range_min[j]);
-    const float b = tick_to_dh_deg(j, s_range_max[j]);
-    *lo = (a < b) ? a : b;
-    *hi = (a < b) ? b : a;
+static constexpr float RAD2DEG = 57.2957795f;
+
+static void init_limits_from_config() {
+    for (int j = 0; j < NUM_JOINTS; ++j) {
+        const JointLimit& lim = JOINT_LIMIT[j / NUM_LEG_JOINTS][j % NUM_LEG_JOINTS];
+        s_lim_deg[j][0] = lim.minimum_rad * RAD2DEG;
+        s_lim_deg[j][1] = lim.maximum_rad * RAD2DEG;
+        s_lim_new[j][0] = s_lim_new[j][1] = false;
+    }
 }
 
 static void print_limit_array() {
     printf("\n// ── tilt_config.h 의 JOINT_LIMIT 을 아래로 교체 ──\n");
-    printf("//    (실측 가동범위. 실제로는 여기서 여유를 두고 좁히는 걸 권장)\n");
+    printf("//    (실측 = 이번에 확정한 값, 기존 = config 값 유지)\n");
     printf("inline constexpr JointLimit JOINT_LIMIT[2][NUM_LEG_JOINTS] = {\n");
     for (int leg = 0; leg < 2; ++leg) {
         printf("    {\n");
         for (int leg_joint = 0; leg_joint < NUM_LEG_JOINTS; ++leg_joint) {
             const int j = leg * NUM_LEG_JOINTS + leg_joint;
-            float lo = 0.0f, hi = 0.0f;
-            range_deg(j, &lo, &hi);
-            printf("        { %+7.1ff * DEG2RAD, %+7.1ff * DEG2RAD },  // %s\n",
-                   lo, hi, JOINT_LABEL[j]);
+            const bool a = s_lim_new[j][0], b = s_lim_new[j][1];
+            // JointLimit = {minimum, maximum}: always print the smaller value first.
+            const float lo = fminf(s_lim_deg[j][0], s_lim_deg[j][1]);
+            const float hi = fmaxf(s_lim_deg[j][0], s_lim_deg[j][1]);
+            printf("        { %+7.1ff * DEG2RAD, %+7.1ff * DEG2RAD },  // %s (%s)\n",
+                   lo, hi, JOINT_LABEL[j],
+                   (a && b) ? "실측" : (a || b) ? (a ? "min 실측, max 기존" : "min 기존, max 실측")
+                                              : "기존");
         }
         printf("    },\n");
     }
@@ -554,7 +579,7 @@ static void set_ankle_zero(const uint16_t pos[NUM_JOINTS]) {
         }
     }
     if (off) {
-        printf("  ⚠ hip/knee 가 zero pose 가 아니면 발목 영점이 틀어집니다. 0 또는 k 로 자세를 맞춘 뒤 다시 하세요.\n");
+        printf("  ⚠ hip/knee 가 zero pose 가 아니면 발목 영점이 틀어집니다. u 또는 k 로 자세를 맞춘 뒤 다시 하세요.\n");
     }
     for (int j = 0; j < NUM_JOINTS; ++j) {
         if (is_ankle(j)) s_zero[j] = zero_from_pose(j, pos[j], ZERO_POSE_RAD[j]);
@@ -574,7 +599,7 @@ static void jog_print_help() {
            mode_name(), step_size() * DEG_PER_TICK);
     printf("  ※ 다리: DH theta 가 0.00 에 수렴하도록 맞추세요.\n");
     printf("    ROLL=다리 수직(좌우 안 기울게) / PITCH=허벅지 수직 / KNEE=정강이 일직선\n");
-    printf("  ※ 발목: hip/knee 를 zero pose 로 둔 채(0 또는 k) 발바닥이 바닥과 평행하게 맞추고 n\n\n");
+    printf("  ※ 발목: hip/knee 를 zero pose 로 둔 채(u 또는 k) 발바닥이 바닥과 평행하게 맞추고 n\n\n");
 }
 
 static void jog_print_table() {
@@ -674,48 +699,182 @@ static void tool_monitor() {
     }
 }
 
-// ── 툴 6: 가동범위 탐색 ──────────────────────────────────────────────
-static void tool_range() {
-    printf("\n── 가동범위 탐색 (전체 토크 OFF) ──────────────\n");
-    printf("  각 관절을 손으로 끝에서 끝까지 천천히 움직이세요.\n");
-    printf("  자기충돌(다리끼리 부딪힘)이 나기 직전까지만!\n");
-    printf("  발목은 발판이 정강이·바닥에 닿기 직전까지만.\n");
-    printf("  x : 종료하고 JOINT_LIMIT 배열 출력\n\n");
-    torque_all(false);
+// ── 툴 6: 관절 제한 지정 (관절별 수동) ───────────────────────────────
+// 관절 하나씩: (−)쪽 끝까지 움직이고 Enter → y/n 확정 → (+)쪽 끝 → Enter → y/n
+// → 그 관절은 0° 로 돌아가고 다음 관절로. 각도는 서보에서 읽은 실측값을 쓴다.
+static constexpr float LIMIT_STEPS_DEG[] = {1.0f, 5.0f, 0.2f};
 
-    uint16_t pos[NUM_JOINTS];
-    if (!read_all(pos)) {
-        printf("  위치 읽기 실패 — 메뉴로 돌아갑니다.\n");
-        return;
-    }
-    for (int j = 0; j < NUM_JOINTS; ++j) {
-        s_range_min[j] = s_range_max[j] = pos[j];
-    }
+static int deg_to_ticks(float deg) {
+    return static_cast<int>(lroundf(deg / DEG_PER_TICK));
+}
 
+// 한 관절만 현재 위치에서 토크 ON (free 모드 해제용)
+static bool hold_joint(int j) {
+    uint16_t t;
+    if (!servo_read_tick(SERVO_ID[j], &t)) return false;
+    s_cur[j] = t;
+    servo_write_tick(SERVO_ID[j], t, 0);
+    vTaskDelay(pdMS_TO_TICKS(3));
+    return servo_torque(SERVO_ID[j], true);
+}
+
+// y / n 을 받는다. Enter(CR/LF) 잔여 입력은 무시. space = 비상정지(false, *estop = true).
+static bool ask_yes_no(bool* estop) {
+    *estop = false;
     while (true) {
-        if (read_all(pos)) {
-            for (int j = 0; j < NUM_JOINTS; ++j) {
-                if (pos[j] < s_range_min[j]) s_range_min[j] = pos[j];
-                if (pos[j] > s_range_max[j]) s_range_max[j] = pos[j];
-            }
-            printf("\r");
-            for (int j = 0; j < NUM_JOINTS; ++j) {
-                printf("%s:[%+6.1f,%+6.1f] ", JOINT_NAME[j],
-                       tick_to_dh_deg(j, s_range_min[j]),
-                       tick_to_dh_deg(j, s_range_max[j]));
-            }
+        const int c = read_key_blocking();
+        if (c == '\r' || c == '\n') continue;
+        if (c == ' ') { *estop = true; return false; }
+        const int k = tolower(c);
+        if (k == 'y' || k == 'n') { printf("%c\n", k); return k == 'y'; }
+    }
+}
+
+static void limit_print_help() {
+    printf("\n  + / -  : 이 관절을 +/- 방향으로 한 스텝   m : 스텝 1° → 5° → 0.2°\n");
+    printf("  f      : 이 관절만 토크 OFF/ON (손으로 움직이기)\n");
+    printf("  Enter  : 지금 각도를 이 쪽 한계로 확정 (y/n)\n");
+    printf("  >      : 이 쪽은 기존 값 유지하고 넘어가기   <  : 이전 관절로\n");
+    printf("  ?      : 도움말   x : 종료하고 JOINT_LIMIT 출력   space : 비상정지\n");
+}
+
+static void limit_print_target(int j, int side) {
+    printf("\n[%d/%d] %s — %s쪽 한계 (DH + = \"%s\")\n", j + 1, NUM_JOINTS, JOINT_LABEL[j],
+           side == 0 ? "최소(−)" : "최대(+)", DH_PLUS_MEANING[j]);
+    printf("  현재 설정: [%+.1f, %+.1f] deg%s\n", s_lim_deg[j][0], s_lim_deg[j][1],
+           (s_lim_new[j][0] || s_lim_new[j][1]) ? "  (이번에 일부 확정됨)" : "");
+}
+
+// 관절 j 를 0° 로 천천히 되돌린다 (다음 관절로 넘어가기 전).
+static void return_joint_to_zero(int j) {
+    const uint16_t target = dh_rad_to_tick(j, 0.0f);
+    servo_write_tick(SERVO_ID[j], target, 400);
+    s_cur[j] = target;
+    vTaskDelay(pdMS_TO_TICKS(700));
+}
+
+static void tool_limit() {
+    printf("\n── 관절 제한 지정 (관절별 수동) ────────────────\n");
+    printf("  관절을 하나씩 (−)끝 → (+)끝 순서로 움직여 Enter 로 확정합니다.\n");
+    printf("  다른 관절은 토크로 현재 자세를 유지합니다. 공중에 매단 상태에서 하세요.\n");
+    printf("  자기충돌·발판 간섭 직전까지만. 서보가 걸려 버티면 바로 -/+ 로 물러나세요.\n");
+    limit_print_help();
+    printf("\n  시작하려면 g, 취소는 아무 키나: ");
+    fflush(stdout);
+    int c = tolower(read_key_blocking());
+    printf("%c\n", c);
+    if (c != 'g') { printf(">> 취소\n"); return; }
+
+    if (!hold_and_torque_on()) return;
+
+    int j = 0;
+    int side = 0;           // 0 = 최소(−), 1 = 최대(+)
+    int step_idx = 0;
+    bool free_mode = false;
+    limit_print_target(j, side);
+
+    while (j < NUM_JOINTS) {
+        uint16_t t;
+        if (servo_read_tick(SERVO_ID[j], &t)) {
+            printf("\r  %s 현재 %+7.1f deg   step %.1f°%s        ", JOINT_NAME[j],
+                   tick_to_dh_deg(j, t), LIMIT_STEPS_DEG[step_idx],
+                   free_mode ? "  [FREE: 손으로]" : "");
             fflush(stdout);
         }
 
-        int c = read_key_timeout(150);
+        c = read_key_timeout(150);
         if (c < 0) continue;
-        if (c == ' ') { emergency_stop(); continue; }
-        if (tolower(c) == 'x') {
-            printf("\n");
-            print_limit_array();
-            return;
+        if (c == ' ') { emergency_stop(); return; }
+
+        if (c == '+' || c == '=' || c == '-' || c == '_') {
+            if (free_mode) { printf("\n  FREE 모드입니다 — f 로 토크를 켠 뒤 +/- 를 쓰세요.\n"); continue; }
+            const int dir = (c == '+' || c == '=') ? +1 : -1;
+            // DH 방향 → raw tick 방향은 부호(JOINT_SIGN)를 따른다.
+            const int dt = dir * s_sign[j] * deg_to_ticks(LIMIT_STEPS_DEG[step_idx]);
+            s_cur[j] = clamp_tick(static_cast<int32_t>(s_cur[j]) + dt);
+            servo_write_tick(SERVO_ID[j], s_cur[j], 0);
+            continue;
+        }
+
+        switch (tolower(c)) {
+            case 'm':
+                step_idx = (step_idx + 1) % 3;
+                break;
+            case 'f':
+                if (free_mode) {
+                    free_mode = !hold_joint(j);
+                    printf("\n  %s 토크 %s\n", JOINT_NAME[j], free_mode ? "ON 실패" : "ON (현재 위치 유지)");
+                } else {
+                    servo_torque(SERVO_ID[j], false);
+                    free_mode = true;
+                    printf("\n  %s 토크 OFF — 손으로 끝까지 움직인 뒤 Enter\n", JOINT_NAME[j]);
+                }
+                break;
+            case '?':
+                limit_print_help();
+                limit_print_target(j, side);
+                break;
+            case 'x':
+                if (free_mode) hold_joint(j);
+                printf("\n>> 종료\n");
+                print_limit_array();
+                return;
+            case '<':
+                if (free_mode) { hold_joint(j); free_mode = false; }
+                if (j > 0) { return_joint_to_zero(j); --j; }
+                side = 0;
+                limit_print_target(j, side);
+                break;
+            case '>':
+            case '\r':
+            case '\n': {
+                bool advance = (c == '>');
+                if (!advance) {
+                    if (!servo_read_tick(SERVO_ID[j], &t)) {
+                        printf("\n  위치 읽기 실패 — 다시 Enter\n");
+                        break;
+                    }
+                    const float deg = tick_to_dh_deg(j, t);
+                    printf("\n  %s %s 한계 = %+.1f deg 로 확정할까요? (y/n): ", JOINT_LABEL[j],
+                           side == 0 ? "최소" : "최대", deg);
+                    fflush(stdout);
+                    bool estop = false;
+                    const bool yes = ask_yes_no(&estop);
+                    if (estop) { emergency_stop(); return; }
+                    if (!yes) { printf("  취소 — 계속 움직이세요.\n"); break; }
+                    if ((side == 0 && deg > 0.0f) || (side == 1 && deg < 0.0f)) {
+                        printf("  ⚠ %s 한계가 0° 의 %s쪽에 있습니다 — 부호(s) 확인 권장.\n",
+                               side == 0 ? "최소" : "최대", side == 0 ? "+" : "−");
+                    }
+                    s_lim_deg[j][side] = deg;
+                    s_lim_new[j][side] = true;
+                    advance = true;
+                }
+                if (!advance) break;
+                if (side == 0) {
+                    side = 1;
+                } else {
+                    if (s_lim_deg[j][0] >= s_lim_deg[j][1]) {
+                        printf("  ⚠ 최소(%+.1f) ≥ 최대(%+.1f) — 이 관절을 다시 하려면 <, > 로 이동하세요.\n",
+                               s_lim_deg[j][0], s_lim_deg[j][1]);
+                    }
+                    printf("  %s 확정: [%+.1f, %+.1f] deg — 0° 로 돌아갑니다.\n", JOINT_LABEL[j],
+                           s_lim_deg[j][0], s_lim_deg[j][1]);
+                    if (free_mode) { hold_joint(j); free_mode = false; }
+                    return_joint_to_zero(j);
+                    side = 0;
+                    ++j;
+                }
+                if (j < NUM_JOINTS) limit_print_target(j, side);
+                break;
+            }
+            default:
+                break;
         }
     }
+
+    printf("\n>> 8관절 모두 완료\n");
+    print_limit_array();
 }
 
 // ── 툴 7: 회전 부호 판별 ─────────────────────────────────────────────
@@ -764,33 +923,134 @@ static void tool_sign() {
     nvs_save_scratch();
 }
 
-// ── 툴 8: zero pose 이동 (config 검증) ───────────────────────────────
-static void tool_goto_zero_pose() {
-    printf("\n── zero pose 이동 ─────────────────────────────\n");
-    printf("  config 의 ZERO_POSE_RAD 로 천천히 이동합니다.\n");
-    printf("  [roll, pitch, knee, ankle] = [%+.0f, %+.0f, %+.0f, %+.0f] deg — 발바닥이 지면과 평행한 기본자세\n",
-           ZERO_POSE_RAD[L_HIP_ROLL] * 180.0f / 3.14159265f,
-           ZERO_POSE_RAD[L_HIP_PITCH] * 180.0f / 3.14159265f,
-           ZERO_POSE_RAD[L_KNEE_PITCH] * 180.0f / 3.14159265f,
-           ZERO_POSE_RAD[L_ANKLE_PITCH] * 180.0f / 3.14159265f);
-    printf("  ※ 로봇이 넘어지지 않게 잡거나 매단 상태에서!\n");
-    printf("  계속하려면 g, 취소는 아무 키나: ");
-    fflush(stdout);
+// ── 툴 8: 영점(HOME) / zero pose 이동 — pose_test 방식 그대로 ────────
+// pose_test 의 armServos() + PosePlayer + controlTask 와 같은 순서:
+//   1) 8관절 위치를 모두 읽는다 (하나라도 실패하면 움직이지 않음)
+//   2) 읽은 위치를 sync write 로 goal 에 기록한 뒤 토크 ON (튀지 않게)
+//   3) rad 공간에서 smoothstep(3차) 보간, CONTROL_PERIOD_MS(10 ms)마다 sync write
+// rad ↔ tick 변환은 pose_test JointMap.h 와 같이 tilt_config.h 의 ZERO_TICK / JOINT_SIGN 만 쓴다
+// (작업값 s_zero 와 무관 — config 에 넣은 영점이 맞는지 확인하는 용도).
+static constexpr uint32_t HOME_DURATION_MS = 2000;   // pose_test kHomeDurationMs
+static constexpr uint32_t STAND_DURATION_MS = 2000;  // pose_test kStandDurationMs
 
-    int c = tolower(read_key_blocking());
-    printf("%c\n", c);
-    if (c != 'g') { printf(">> 취소\n"); return; }
+static bool config_rad_to_tick(int j, float rad, uint16_t* tick_out) {
+    const float raw = static_cast<float>(ZERO_TICK[j]) +
+                      static_cast<float>(JOINT_SIGN[j]) * rad / RAD_PER_TICK;
+    const long rounded = lroundf(raw);
+    if (rounded < SERVO_POS_MIN || rounded > SERVO_POS_MAX) return false;
+    *tick_out = static_cast<uint16_t>(rounded);
+    return true;
+}
 
-    if (!hold_and_torque_on()) return;
+static float config_tick_to_rad(int j, uint16_t tick) {
+    return static_cast<float>(JOINT_SIGN[j]) *
+           (static_cast<int>(tick) - static_cast<int>(ZERO_TICK[j])) * RAD_PER_TICK;
+}
 
+// pose_test armServos(): 전부 읽고, 그 위치를 goal 로 쓰고, 토크 ON.
+static bool arm_like_pose_test(float measured_rad[NUM_JOINTS]) {
+    uint16_t ticks[NUM_JOINTS];
+    bool all_read = true;
     for (int j = 0; j < NUM_JOINTS; ++j) {
-        uint16_t target = dh_rad_to_tick(j, ZERO_POSE_RAD[j]);
-        printf("  %-14s %4u -> %4u\n", JOINT_LABEL[j], s_cur[j], target);
-        s_cur[j] = target;
-        servo_write_tick(SERVO_ID[j], target, 300);   // 느리게
-        vTaskDelay(pdMS_TO_TICKS(400));
+        if (!servo_read_tick(SERVO_ID[j], &ticks[j])) {
+            printf("  arm 거부: %s (ID %u) 위치 읽기 실패\n", JOINT_NAME[j], SERVO_ID[j]);
+            all_read = false;
+        } else {
+            measured_rad[j] = config_tick_to_rad(j, ticks[j]);
+        }
+        vTaskDelay(pdMS_TO_TICKS(3));
     }
-    printf(">> 완료. 발판이 지면과 평행하고 발바닥 점이 hip pitch 축 바로 아래인지 확인하세요.\n");
+    if (!all_read) {
+        printf("  8관절 위치가 모두 필요합니다 — 토크는 그대로 둡니다. 배선/전원/ID(p) 확인.\n");
+        return false;
+    }
+    if (bus().syncWritePositions(SERVO_ID, ticks, NUM_JOINTS, 0, 0) != ESP_OK) {
+        printf("  arm 거부: 현재 위치 유지 명령(sync write) 실패\n");
+        return false;
+    }
+    if (bus().setTorqueAll(SERVO_ID, NUM_JOINTS, true) != ESP_OK) {
+        printf("  토크 ON 실패 — 비상정지\n");
+        emergency_stop();
+        return false;
+    }
+    memcpy(s_cur, ticks, sizeof(ticks));
+    return true;
+}
+
+static void move_pose_config(const float pose_rad[NUM_JOINTS], uint32_t duration_ms,
+                             const char* name) {
+    printf("\n>> %s 로 이동 (%lu ms, tilt_config.h 기준) — space = 비상정지\n", name,
+           static_cast<unsigned long>(duration_ms));
+
+    // 목표가 서보 범위 밖이면 출발하지 않는다 (pose_test convertCommand 와 같은 검사).
+    uint16_t target_ticks[NUM_JOINTS];
+    for (int j = 0; j < NUM_JOINTS; ++j) {
+        if (!config_rad_to_tick(j, pose_rad[j], &target_ticks[j])) {
+            printf("  거부: %s 목표가 서보 범위(0~4095) 밖입니다 — ZERO_TICK/JOINT_SIGN 확인\n",
+                   JOINT_NAME[j]);
+            return;
+        }
+    }
+
+    float start[NUM_JOINTS];
+    if (!arm_like_pose_test(start)) return;
+
+    TickType_t last_wake = xTaskGetTickCount();
+    uint32_t elapsed = 0;
+    uint16_t ticks[NUM_JOINTS];
+    bool write_error = false;
+    while (elapsed < duration_ms) {
+        uint8_t ch = 0;
+        while (usb_serial_jtag_read_bytes(&ch, 1, 0) > 0) {
+            if (ch == ' ') { emergency_stop(); return; }
+        }
+
+        elapsed += CONTROL_PERIOD_MS;
+        if (elapsed > duration_ms) elapsed = duration_ms;
+        const float sn = static_cast<float>(elapsed) / static_cast<float>(duration_ms);
+        const float smooth = sn * sn * (3.0f - 2.0f * sn);   // PosePlayer::step 과 동일
+        for (int j = 0; j < NUM_JOINTS; ++j) {
+            const float q = start[j] + (pose_rad[j] - start[j]) * smooth;
+            if (!config_rad_to_tick(j, q, &ticks[j])) ticks[j] = s_cur[j];
+        }
+        if (bus().syncWritePositions(SERVO_ID, ticks, NUM_JOINTS, 0, 0) == ESP_OK) {
+            memcpy(s_cur, ticks, sizeof(ticks));
+        } else if (!write_error) {
+            printf("  sync write 실패 — 마지막 명령 유지\n");
+            write_error = true;
+        }
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(CONTROL_PERIOD_MS));
+    }
+    vTaskDelay(pdMS_TO_TICKS(300));  // 정착 대기
+
+    printf("  reached %s\n", name);
+    printf("\n  %-14s %8s %6s %6s %8s %8s\n", "joint", "target", "goal", "meas", "meas°", "err");
+    printf("  ----------------------------------------------------------------\n");
+    for (int j = 0; j < NUM_JOINTS; ++j) {
+        const float want = pose_rad[j] * RAD2DEG;
+        uint16_t m = 0;
+        if (servo_read_tick(SERVO_ID[j], &m)) {
+            const float got = config_tick_to_rad(j, m) * RAD2DEG;
+            printf("  %-14s %+7.1f° %6u %6u %+7.1f° %+7.1f°%s\n", JOINT_LABEL[j], want,
+                   target_ticks[j], m, got, got - want, fabsf(got - want) > 2.0f ? "  ← 큼" : "");
+        } else {
+            printf("  %-14s %+7.1f° %6u %6s\n", JOINT_LABEL[j], want, target_ticks[j], "?");
+        }
+        vTaskDelay(pdMS_TO_TICKS(3));
+    }
+    printf("  (goal = config ZERO_TICK 기준 목표 tick, err = 실측 − 목표. 1° 안팎은 정상)\n\n");
+}
+
+static void tool_goto_home() {
+    static const float home[NUM_JOINTS] = {};   // pose_test homePose(): 전 관절 0 rad
+    move_pose_config(home, HOME_DURATION_MS, "HOME [0, 0, 0, 0]");
+    printf(">> 다리가 곧게 펴졌는지 확인: roll = 수직, 허벅지 수직, 정강이 일직선.\n");
+    printf("   발목 0° = 발바닥이 정강이와 직각 → 다리를 편 HOME 에서 발바닥이 지면과 평행해야 정상.\n\n");
+}
+
+static void tool_goto_zero_pose() {
+    move_pose_config(ZERO_POSE_RAD, STAND_DURATION_MS, "STAND [0, -20, +40, -20]");
+    printf(">> 발판이 지면과 평행하고 발바닥 점이 hip pitch 축 바로 아래인지 확인하세요.\n");
     printf("   (지면~hip pitch 축 높이가 약 %.0fmm 여야 함)\n\n", ZERO_POSE_HEIGHT_MM);
 }
 
@@ -891,17 +1151,19 @@ static void print_menu() {
     printf("  j : 정밀 조그  ← 영점 잡기 본체 (z = 다리 6관절, n = 발목)\n");
     printf("  o : 토크 해제 + 엔코더 모니터\n");
     printf("  k : 발목 영점 (zero pose 로 세우고 발바닥을 바닥에 맞춤)\n");
-    printf("  l : 가동범위 탐색 -> JOINT_LIMIT\n");
+    printf("  l : 관절 제한 지정 (관절별 수동, Enter + y/n) -> JOINT_LIMIT\n");
     printf("  s : 회전 부호 판별 -> JOINT_SIGN\n");
-    printf("  0 : zero pose 로 이동 (config 검증)\n");
-    printf("  v : 현재 작업값 배열 전부 출력\n");
+    printf("  h : HOME — 전 관절 0° 로 이동 (pose_test h 와 동일, tilt_config.h 영점 검증)\n");
+    printf("  u : STAND — zero pose [0, -20, +40, -20] 으로 이동 (tilt_config.h 기준)\n");
+    printf("  v : 현재 작업값 배열 전부 출력 (영점·부호·제한)\n");
+    printf("  r : NVS 스크래치를 작업값으로 불러오기\n");
     printf("  c : NVS 스크래치 비우기\n");
     printf("  t : 전체 토크 ON/OFF 토글\n");
-    printf("  h : 이 메뉴\n");
+    printf("  ? : 이 메뉴\n");
     printf("  space : 비상정지\n\n");
 }
 
-static void menu_task(void *arg) {
+static void menu_task(void *) {
     print_menu();
     bool torque_on = s_boot_torque_on;
 
@@ -918,13 +1180,17 @@ static void menu_task(void *arg) {
             case 'j': tool_jog();             break;
             case 'o': tool_monitor();         break;
             case 'k': tool_ankle_zero();      break;
-            case 'l': tool_range();           break;
+            case 'l': tool_limit();           break;
             case 's': tool_sign();            break;
-            case '0': tool_goto_zero_pose();  break;
+            case 'h':
+            case '0': tool_goto_home();       break;
+            case 'u': tool_goto_zero_pose();  break;
             case 'v':
                 print_zero_array();
                 print_sign_array();
+                print_limit_array();
                 break;
+            case 'r': nvs_load_scratch(true); break;
             case 'c': nvs_clear_scratch();    break;
             case 't':
                 if (torque_on) {
@@ -935,7 +1201,7 @@ static void menu_task(void *arg) {
                 }
                 printf(">> 전체 토크 %s\n", torque_on ? "ON" : "OFF");
                 break;
-            case 'h': print_menu();           break;
+            case '?': print_menu();           break;
             default: break;
         }
     }
@@ -949,8 +1215,10 @@ extern "C" void app_main(void) {
         s_sign[j] = JOINT_SIGN[j];
     }
 
+    init_limits_from_config();
+
     nvs_init_once();
-    nvs_load_scratch();
+    nvs_load_scratch(false);
 
     usb_serial_jtag_driver_config_t ucfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
     esp_err_t err = usb_serial_jtag_driver_install(&ucfg);
@@ -958,6 +1226,14 @@ extern "C" void app_main(void) {
 
     if (!servo_bus_init()) {
         printf("서보 버스 초기화 실패\n");
+    }
+
+    // pose_test 와 같이 가속도 레지스터를 0 으로 (다른 테스트가 남긴 가속도 설정 제거)
+    for (int j = 0; j < NUM_JOINTS; ++j) {
+        if (bus().setAcceleration(SERVO_ID[j], 0) != ESP_OK) {
+            printf("  %-14s ID %u: acceleration=0 실패 (응답 없음?)\n", JOINT_LABEL[j], SERVO_ID[j]);
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
     }
 
     // 부팅 시 절대 위치 명령은 보내지 않는다 — 현재 위치를 읽어 기준으로만 삼음
