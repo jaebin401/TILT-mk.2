@@ -105,7 +105,7 @@ inline constexpr std::int8_t JOINT_SIGN[NUM_JOINTS] = {
     -1,  // R_HIP_ROLL
     +1,  // R_HIP_PITCH
     +1,  // R_KNEE_PITCH
-    +1,  // R_ANKLE_PITCH (placeholder)
+    -1,  // R_ANKLE_PITCH (placeholder)
 };
 
 // Zero pose: hip -20°, knee +40°, ankle -20° on each leg; sole stays flat.
