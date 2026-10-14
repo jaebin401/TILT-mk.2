@@ -41,6 +41,10 @@ void expectNear(float actual, float expected, float tolerance,
 
 constexpr float rad(float degrees) { return degrees * tilt::DEG2RAD; }
 
+// The MuJoCo reference (and the URDF) has the old fixed foot; this ankle angle
+// reproduces it with the ankle model (tilt_kinematics.h).
+constexpr float kOldFootAnkle = tilt::model::SOLE_PITCH_AT_ZERO_RAD - tilt::ANKLE_FIXED_RAD;
+
 float distance(const tilt::Vec3& a, const tilt::Vec3& b) {
     const float dx = a.x - b.x;
     const float dy = a.y - b.y;
@@ -55,7 +59,8 @@ void testForwardKinematicsAgainstMujoco() {
     for (const auto& sample : kinematics_reference::SAMPLES) {
         for (const tilt::Leg leg : {tilt::Leg::LEFT, tilt::Leg::RIGHT}) {
             const bool left = leg == tilt::Leg::LEFT;
-            const float* theta = left ? sample.left_theta : sample.right_theta;
+            const float* t3 = left ? sample.left_theta : sample.right_theta;
+            const float theta[] = {t3[0], t3[1], t3[2], kOldFootAnkle};
             const float* sole = left ? sample.left_sole_mm : sample.right_sole_mm;
             const auto& rotation = left ? sample.left_sole_R : sample.right_sole_R;
             const tilt::LegFrames frames = tilt::fk_leg(leg, theta);
@@ -79,7 +84,7 @@ void testForwardKinematicsAgainstMujoco() {
 
 void testStandPose() {
     constexpr char kTest[] = "T2 stand pose";
-    const float theta[] = {0.0f, rad(-20.0f), rad(+40.0f)};
+    const float theta[] = {0.0f, rad(-20.0f), rad(+40.0f), rad(-20.0f)};
     for (const tilt::Leg leg : {tilt::Leg::LEFT, tilt::Leg::RIGHT}) {
         const tilt::LegFrames frames = tilt::fk_leg(leg, theta);
         const int i = static_cast<int>(leg);
@@ -106,19 +111,25 @@ void testRoundTrip() {
         for (int roll = -13; roll <= 17; roll += 5) {
             for (int hip = -70; hip <= 15; hip += 5) {
                 for (int knee = 5; knee <= 75; knee += 5) {
+                  for (int sole_pitch = -20; sole_pitch <= 20; sole_pitch += 20) {
+                    // Ankle from the wanted sole pitch (0 = flat).
+                    const float ankle = rad(static_cast<float>(sole_pitch - hip - knee)) -
+                                        tilt::ANKLE_FIXED_RAD;
                     const float theta[] = {rad(static_cast<float>(roll)),
                                            rad(static_cast<float>(hip)),
-                                           rad(static_cast<float>(knee))};
+                                           rad(static_cast<float>(knee)), ankle};
                     const tilt::Vec3 sole = tilt::fk_foot(leg, theta);
-                    const tilt::IkResult ik = tilt::ik_foot(leg, sole);
+                    const tilt::IkResult ik =
+                        tilt::ik_foot(leg, sole, tilt::sole_pitch_rad(theta));
                     EXPECT_TRUE(kTest, ik.reachable);
-                    for (int j = 0; j < 3; ++j) {
+                    for (int j = 0; j < tilt::NUM_LEG_JOINTS; ++j) {
                         const float e = std::fabs(ik.theta[j] - theta[j]);
                         if (e > worst_rad) worst_rad = e;
                     }
                     const float e = distance(tilt::fk_foot(leg, ik.theta), sole);
                     if (e > worst_mm) worst_mm = e;
                     ++count;
+                  }
                 }
             }
         }
@@ -140,7 +151,7 @@ void testWorkspaceBoundary() {
     EXPECT_TRUE(kTest, !at_hip.reachable);
     EXPECT_TRUE(kTest, inside.reachable);
     for (const tilt::IkResult* r : {&too_far, &at_hip, &inside}) {
-        for (int j = 0; j < 3; ++j) EXPECT_TRUE(kTest, std::isfinite(r->theta[j]));
+        for (int j = 0; j < tilt::NUM_LEG_JOINTS; ++j) EXPECT_TRUE(kTest, std::isfinite(r->theta[j]));
     }
     const tilt::IkResult nan_target = tilt::ik_foot(leg, {NAN, 0.0f, -100.0f});
     EXPECT_TRUE(kTest, !nan_target.reachable);
@@ -148,15 +159,19 @@ void testWorkspaceBoundary() {
 
 void testSignConventions() {
     constexpr char kTest[] = "T5 sign conventions";
-    const float stand[] = {0.0f, rad(-20.0f), rad(+40.0f)};
+    const float stand[] = {0.0f, rad(-20.0f), rad(+40.0f), rad(-20.0f)};
     for (const tilt::Leg leg : {tilt::Leg::LEFT, tilt::Leg::RIGHT}) {
         const tilt::Vec3 base = tilt::fk_foot(leg, stand);
-        const float roll[] = {rad(5.0f), stand[1], stand[2]};
-        const float pitch[] = {0.0f, stand[1] + rad(5.0f), stand[2]};
-        const float knee[] = {0.0f, stand[1], stand[2] + rad(5.0f)};
+        const float roll[] = {rad(5.0f), stand[1], stand[2], stand[3]};
+        const float pitch[] = {0.0f, stand[1] + rad(5.0f), stand[2], stand[3]};
+        const float knee[] = {0.0f, stand[1], stand[2] + rad(5.0f), stand[3]};
+        const float ankle[] = {0.0f, stand[1], stand[2], stand[3] + rad(5.0f)};
         EXPECT_TRUE(kTest, tilt::fk_foot(leg, roll).y > base.y);    // + roll: foot left
         EXPECT_TRUE(kTest, tilt::fk_foot(leg, pitch).x < base.x);   // + pitch: leg back
         EXPECT_TRUE(kTest, tilt::fk_foot(leg, knee).z > base.z);    // + knee: foot up
+        // + ankle: toes down — the sole frame's x axis points down.
+        EXPECT_TRUE(kTest, tilt::fk_leg(leg, ankle).sole.R.m[2][0] < -0.05f);
+        EXPECT_NEAR(kTest, tilt::sole_pitch_rad(ankle), rad(5.0f), 1e-5f);
     }
 }
 
@@ -168,8 +183,9 @@ void testLeftRightSymmetry() {
             for (int knee = 10; knee <= 70; knee += 15) {
                 const float left[] = {rad(static_cast<float>(roll)),
                                       rad(static_cast<float>(hip)),
-                                      rad(static_cast<float>(knee))};
-                const float right[] = {-left[0], left[1], left[2]};
+                                      rad(static_cast<float>(knee)),
+                                      -rad(static_cast<float>(hip + knee))};
+                const float right[] = {-left[0], left[1], left[2], left[3]};
                 const tilt::Vec3 l = tilt::fk_foot(tilt::Leg::LEFT, left);
                 const tilt::Vec3 r = tilt::fk_foot(tilt::Leg::RIGHT, right);
                 const tilt::Vec3 mirrored{r.x, -r.y, r.z};
@@ -185,13 +201,14 @@ void testLeftRightSymmetry() {
 
 void testClampToLimits() {
     constexpr char kTest[] = "T7 clamp_to_limits";
-    float inside[] = {0.0f, rad(-20.0f), rad(40.0f)};
+    float inside[] = {0.0f, rad(-20.0f), rad(40.0f), rad(-20.0f)};
     EXPECT_TRUE(kTest, tilt::clamp_to_limits(tilt::Leg::LEFT, inside));
-    float outside[] = {rad(40.0f), rad(-120.0f), NAN};
+    float outside[] = {rad(40.0f), rad(-120.0f), NAN, rad(-100.0f)};
     EXPECT_TRUE(kTest, !tilt::clamp_to_limits(tilt::Leg::RIGHT, outside));
     EXPECT_NEAR(kTest, outside[0], tilt::JOINT_LIMIT[1][0].maximum_rad, 1e-6f);
     EXPECT_NEAR(kTest, outside[1], tilt::JOINT_LIMIT[1][1].minimum_rad, 1e-6f);
     EXPECT_TRUE(kTest, std::isfinite(outside[2]));
+    EXPECT_NEAR(kTest, outside[3], tilt::JOINT_LIMIT[1][3].minimum_rad, 1e-6f);
 }
 
 }  // namespace

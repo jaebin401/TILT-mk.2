@@ -12,7 +12,7 @@ Platform-neutral (no ESP-IDF headers) whole-body state estimation for TILT mk.2.
 
 | Input | Source on the robot |
 |---|---|
-| leg joint angles (firmware order L roll/pitch/knee, R roll/pitch/knee) | servo read-back (preferred, `joint_lag_s = 0`) or commanded angles (`joint_lag_s ≈ 0.03`) |
+| leg joint angles (firmware order L roll/pitch/knee/ankle, R roll/pitch/knee/ankle) | servo read-back (preferred, `joint_lag_s = 0`) or commanded angles (`joint_lag_s ≈ 0.03`) |
 | roll, pitch (rad) | `tilt_MPU6050` complementary filter |
 | gyro x/y/z (rad/s, body frame) | `imu_read_raw` + `gyro_to_rad_s` |
 | support (double / left / right) | gait state or foot contact sensors |

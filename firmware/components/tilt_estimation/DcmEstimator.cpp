@@ -58,7 +58,7 @@ void DcmEstimator::reset(const float leg_theta[NUM_JOINTS]) {
     for (int j = 0; j < NUM_JOINTS; ++j) theta_[j] = leg_theta[j];
     com_body_prev_ = center_of_mass(theta_, config_.upper);
     sole_body_prev_[0] = fk_foot(Leg::LEFT, &theta_[0]);
-    sole_body_prev_[1] = fk_foot(Leg::RIGHT, &theta_[3]);
+    sole_body_prev_[1] = fk_foot(Leg::RIGHT, &theta_[NUM_LEG_JOINTS]);
     velocity_filtered_ = {0.0f, 0.0f, 0.0f};
     joint_velocity_filtered_ = {0.0f, 0.0f, 0.0f};
     state_ = DcmState{};
@@ -80,7 +80,7 @@ const DcmState& DcmEstimator::update(const float commanded_theta[NUM_JOINTS],
     // 2. Kinematics in B.
     const Vec3 com_body = center_of_mass(theta_, config_.upper);
     const LegFrames frames[2] = {fk_leg(Leg::LEFT, &theta_[0]),
-                                 fk_leg(Leg::RIGHT, &theta_[3])};
+                                 fk_leg(Leg::RIGHT, &theta_[NUM_LEG_JOINTS])};
     const Vec3 sole_body[2] = {frames[0].sole.p, frames[1].sole.p};
     const Vec3 ref_body = reference_point(support, sole_body);
     const Vec3 ref_body_prev = reference_point(support, sole_body_prev_);

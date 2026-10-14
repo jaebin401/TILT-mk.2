@@ -45,9 +45,9 @@ void testStartAndFirstSwing() {
     const Command& c = g.command();
     EXPECT_TRUE(kT, c.running && c.phase == Phase::kSwing);
     EXPECT_TRUE(kT, c.swing == Side::kRight && c.support == Support::kLeft);
-    EXPECT_TRUE(kT, std::fabs(c.position_rad[tilt::R_HIP_PITCH] - rad(-35.0f)) < 1e-5f);
-    EXPECT_TRUE(kT, std::fabs(c.position_rad[tilt::R_KNEE_PITCH] - rad(55.0f)) < 1e-5f);
-    EXPECT_TRUE(kT, std::fabs(c.position_rad[tilt::L_HIP_PITCH] - rad(-20.0f)) < 1e-5f);
+    EXPECT_TRUE(kT, std::fabs(c.position_rad[tilt::R_HIP_PITCH] - (standPose()[tilt::R_HIP_PITCH] - rad(15.0f))) < 1e-5f);
+    EXPECT_TRUE(kT, std::fabs(c.position_rad[tilt::R_KNEE_PITCH] - (standPose()[tilt::R_KNEE_PITCH] + rad(15.0f))) < 1e-5f);
+    EXPECT_TRUE(kT, std::fabs(c.position_rad[tilt::L_HIP_PITCH] - standPose()[tilt::L_HIP_PITCH]) < 1e-5f);
     // First swing is open loop: DCM conditions are ignored until start_hold_ms.
     DcmState s = centred();
     s.dcm_mm[1] = -60.0f;  // Would trigger touchdown in a normal swing.
@@ -114,7 +114,7 @@ void testDoubleTimeout() {
     runFor(g, centred(), 300);
     EXPECT_TRUE(kT, !g.running());
     EXPECT_TRUE(kT, g.command().stop_reason == StopReason::kDoubleTimeout);
-    EXPECT_TRUE(kT, std::fabs(g.command().position_rad[tilt::R_KNEE_PITCH] - rad(40.0f)) < 1e-5f);
+    EXPECT_TRUE(kT, std::fabs(g.command().position_rad[tilt::R_KNEE_PITCH] - standPose()[tilt::R_KNEE_PITCH]) < 1e-5f);
 }
 
 void testDoubleFallbackLift() {
@@ -224,7 +224,38 @@ void testInsideDistance() {
 
 }  // namespace
 
+// 8 joints (with ankle): stand pose and both lift modes keep the sole parallel.
+void testLiftModesAndStand() {
+    constexpr char kT[] = "G0 stand / lift modes (ankle)";
+    const JointArray stand = standPose();
+    for (int leg = 0; leg < 2; ++leg) {
+        const int b = leg * tilt::NUM_LEG_JOINTS;
+        EXPECT_TRUE(kT, std::fabs(stand[b + 1] - rad(-20.0f)) < 1e-6f);
+        EXPECT_TRUE(kT, std::fabs(stand[b + 2] - rad(40.0f)) < 1e-6f);
+        EXPECT_TRUE(kT, std::fabs(stand[b + 3] - rad(-20.0f)) < 1e-6f);
+    }
+    for (const LiftMode mode : {LiftMode::kFlash, LiftMode::kVertical}) {
+        Params p;
+        p.lift_mode = mode;
+        DcmStepping g(p);
+        g.start();  // First swing: right leg.
+        const JointArray& q = g.command().position_rad;
+        const float sum_r = q[tilt::R_HIP_PITCH] + q[tilt::R_KNEE_PITCH] + q[tilt::R_ANKLE_PITCH];
+        const float sum_stand = stand[tilt::R_HIP_PITCH] + stand[tilt::R_KNEE_PITCH] +
+                                stand[tilt::R_ANKLE_PITCH];
+        EXPECT_TRUE(kT, std::fabs(sum_r - sum_stand) < 1e-5f);  // Sole parallel.
+        EXPECT_TRUE(kT, std::fabs(q[tilt::R_HIP_PITCH] - (stand[tilt::R_HIP_PITCH] - rad(15.0f))) < 1e-5f);
+        const float knee = mode == LiftMode::kVertical ? 30.0f : 15.0f;
+        const float ankle = mode == LiftMode::kVertical ? -15.0f : 0.0f;
+        EXPECT_TRUE(kT, std::fabs(q[tilt::R_KNEE_PITCH] - (stand[tilt::R_KNEE_PITCH] + rad(knee))) < 1e-5f);
+        EXPECT_TRUE(kT, std::fabs(q[tilt::R_ANKLE_PITCH] - (stand[tilt::R_ANKLE_PITCH] + rad(ankle))) < 1e-5f);
+        EXPECT_TRUE(kT, q[tilt::R_HIP_ROLL] == stand[tilt::R_HIP_ROLL]);
+        for (int j = 0; j < tilt::NUM_LEG_JOINTS; ++j) EXPECT_TRUE(kT, q[j] == stand[j]);  // Left untouched.
+    }
+}
+
 int main() {
+    testLiftModesAndStand();
     testStartAndFirstSwing();
     testDcmLift();
     testDcmTouchdownAndTimeout();

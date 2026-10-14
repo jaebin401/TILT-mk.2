@@ -16,7 +16,10 @@ struct UpperBodyPose {
 };
 
 // leg_theta uses the firmware joint order (tilt::JointIndex):
-// {L_HIP_ROLL, L_HIP_PITCH, L_KNEE_PITCH, R_HIP_ROLL, R_HIP_PITCH, R_KNEE_PITCH}.
+// {L_HIP_ROLL, L_HIP_PITCH, L_KNEE_PITCH, L_ANKLE_PITCH,
+//  R_HIP_ROLL, R_HIP_PITCH, R_KNEE_PITCH, R_ANKLE_PITCH}.
+// The URDF calf link (with the foot) is placed in the calf frame; the ankle
+// servo and the foot rotation are not in the mass model yet.
 // Returns the CoM in base frame B (mm).
 Vec3 center_of_mass(const float leg_theta[NUM_JOINTS],
                     const UpperBodyPose& upper = UpperBodyPose{});

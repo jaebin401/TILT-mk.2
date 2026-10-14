@@ -72,6 +72,63 @@ float wrap_pi(float angle) {
     return std::remainder(angle, 2.0f * PI_RAD);
 }
 
+// Foot rotation about the ankle axis relative to the URDF's fixed foot.
+constexpr float kAnkleModelOffsetRad = ANKLE_FIXED_RAD - model::SOLE_PITCH_AT_ZERO_RAD;
+
+// Ankle axis point in the calf frame (see the header): on the calf axis at
+// CALF_LENGTH_MM, at the sole frame's lateral position.
+Vec3 ankle_point_in_calf(int i) {
+    return {CALF_LENGTH_MM, 0.0f, model::SOLE_FIXED[i].origin_mm[2]};
+}
+
+// Sagittal (x, z) vectors in the roll frame with every joint at 0:
+// H -> knee, knee -> ankle axis, ankle axis -> sole point.
+struct SagittalChain {
+    float thigh[2];
+    float shank[2];
+    float foot[2];
+};
+
+LegFrames fk_leg_impl(int i, const float theta[NUM_LEG_JOINTS]);
+
+const SagittalChain& sagittal_chain(int i) {
+    static SagittalChain chains[2];
+    static bool ready = false;
+    if (!ready) {
+        for (int leg = 0; leg < 2; ++leg) {
+            const float zero[NUM_LEG_JOINTS] = {};
+            const LegFrames f = fk_leg_impl(leg, zero);
+            const Vec3 h = {model::HIP_POINT_MM[leg][0], model::HIP_POINT_MM[leg][1],
+                            model::HIP_POINT_MM[leg][2]};
+            const Vec3 k = f.calf.p;
+            const Vec3 a = f.ankle.p;
+            const Vec3 s = f.sole.p;
+            chains[leg] = {{k.x - h.x, k.z - h.z}, {a.x - k.x, a.z - k.z}, {s.x - a.x, s.z - a.z}};
+        }
+        ready = true;
+    }
+    return chains[i];
+}
+
+LegFrames fk_leg_impl(int i, const float theta[NUM_LEG_JOINTS]) {
+    const Pose base{identity(), {0.0f, 0.0f, 0.0f}};
+    LegFrames frames{};
+    frames.hip = apply_joint(base, model::LEG_JOINT[i][0], theta[0]);
+    frames.thigh = apply_joint(frames.hip, model::LEG_JOINT[i][1], theta[1]);
+    frames.calf = apply_joint(frames.thigh, model::LEG_JOINT[i][2], theta[2]);
+
+    // Ankle: rotate the URDF foot about an axis parallel to the knee axis.
+    const Vec3 a = ankle_point_in_calf(i);
+    frames.ankle.p = transform_point(frames.calf, a);
+    frames.ankle.R = multiply(frames.calf.R,
+                              axis_angle(model::LEG_JOINT[i][2].axis,
+                                         theta[3] + kAnkleModelOffsetRad));
+    const float* o = model::SOLE_FIXED[i].origin_mm;
+    frames.sole.p = transform_point(frames.ankle, {o[0] - a.x, o[1] - a.y, o[2] - a.z});
+    frames.sole.R = multiply(frames.ankle.R, from_array(model::SOLE_FIXED[i].rotation));
+    return frames;
+}
+
 }  // namespace
 
 Pose base_pose() {
@@ -89,30 +146,23 @@ Vec3 transform_point(const Pose& pose, const Vec3& local) {
     return {pose.p.x + r.x, pose.p.y + r.y, pose.p.z + r.z};
 }
 
-LegFrames fk_leg(Leg leg, const float theta[3]) {
-    const int i = static_cast<int>(leg);
-    const Pose base{identity(), {0.0f, 0.0f, 0.0f}};
-    LegFrames frames{};
-    frames.hip = apply_joint(base, model::LEG_JOINT[i][0], theta[0]);
-    frames.thigh = apply_joint(frames.hip, model::LEG_JOINT[i][1], theta[1]);
-    frames.calf = apply_joint(frames.thigh, model::LEG_JOINT[i][2], theta[2]);
-    frames.sole = apply_joint(frames.calf, model::SOLE_FIXED[i], 0.0f);
-    return frames;
+LegFrames fk_leg(Leg leg, const float theta[NUM_LEG_JOINTS]) {
+    return fk_leg_impl(static_cast<int>(leg), theta);
 }
 
-Vec3 fk_foot(Leg leg, const float theta[3]) {
+Vec3 fk_foot(Leg leg, const float theta[NUM_LEG_JOINTS]) {
     return fk_leg(leg, theta).sole.p;
 }
 
-float sole_pitch_rad(const float theta[3]) {
-    return model::SOLE_PITCH_AT_ZERO_RAD + theta[1] + theta[2];
+float sole_pitch_rad(const float theta[NUM_LEG_JOINTS]) {
+    return ANKLE_FIXED_RAD + theta[1] + theta[2] + theta[3];
 }
 
-IkResult ik_foot(Leg leg, const Vec3& sole_target) {
+IkResult ik_foot(Leg leg, const Vec3& sole_target, float sole_pitch) {
     const int i = static_cast<int>(leg);
     if (!std::isfinite(sole_target.x) || !std::isfinite(sole_target.y) ||
-        !std::isfinite(sole_target.z)) {
-        return {{0.0f, 0.0f, 0.0f}, false};
+        !std::isfinite(sole_target.z) || !std::isfinite(sole_pitch)) {
+        return {{0.0f, 0.0f, 0.0f, 0.0f}, false};
     }
     bool reachable = true;
 
@@ -133,16 +183,27 @@ IkResult ik_foot(Leg leg, const Vec3& sole_target) {
     const float zp = -std::sqrt(rho * rho - d * d);  // Foot below the hip.
     const float roll = wrap_pi(std::atan2(rz, ry) - std::atan2(zp, d));
 
-    // Sagittal plane: two links rotating about +y (Ry rotates (x, z) by -q).
-    const float tx = model::THIGH_XZ_MM[i][0];
-    const float tz = model::THIGH_XZ_MM[i][1];
-    const float sx = model::SHANK_XZ_MM[i][0];
-    const float sz = model::SHANK_XZ_MM[i][1];
+    // Sagittal plane: pitch joints rotate (x, z) about +y (Ry rotates by -q):
+    //   x' = x cos q + z sin q,  z' = -x sin q + z cos q.
+    // The foot vector (ankle axis -> sole) is rotated by the total pitch
+    // phi = hip + knee + ankle; subtract it to get the ankle-axis target, then
+    // solve the two-link (thigh, shank) problem for it.
+    const SagittalChain& chain = sagittal_chain(i);
+    const float phi = sole_pitch - ANKLE_FIXED_RAD;
+    const float cphi = std::cos(phi);
+    const float sphi = std::sin(phi);
+    const float fx = chain.foot[0] * cphi + chain.foot[1] * sphi;
+    const float fz = -chain.foot[0] * sphi + chain.foot[1] * cphi;
+
+    const float tx = chain.thigh[0];
+    const float tz = chain.thigh[1];
+    const float sx = chain.shank[0];
+    const float sz = chain.shank[1];
     const float l1 = std::sqrt(tx * tx + tz * tz);
     const float l2 = std::sqrt(sx * sx + sz * sz);
 
-    float px = rx;
-    float pz = zp;
+    float px = rx - fx;
+    float pz = zp - fz;
     float dist = std::sqrt(px * px + pz * pz);
     const float max_reach = l1 + l2 - REACH_CLAMP_EPS_MM;
     const float min_reach = std::fabs(l1 - l2) + REACH_CLAMP_EPS_MM;
@@ -174,11 +235,12 @@ IkResult ik_foot(Leg leg, const Vec3& sole_target) {
     const float wx = tx + (sx * ck + sz * sk);
     const float wz = tz + (-sx * sk + sz * ck);
     const float hip = wrap_pi(std::atan2(wz, wx) - std::atan2(pz, px));
+    const float ankle = wrap_pi(phi - hip - knee);
 
-    return {{roll, hip, knee}, reachable};
+    return {{roll, hip, knee, ankle}, reachable};
 }
 
-bool clamp_to_limits(Leg leg, float theta[3]) {
+bool clamp_to_limits(Leg leg, float theta[NUM_LEG_JOINTS]) {
     if (theta == nullptr) {
         return false;
     }
@@ -189,7 +251,7 @@ bool clamp_to_limits(Leg leg, float theta[3]) {
     }
 
     bool unchanged = true;
-    for (std::uint8_t joint = 0; joint < 3; ++joint) {
+    for (std::uint8_t joint = 0; joint < NUM_LEG_JOINTS; ++joint) {
         const JointLimit& limit = JOINT_LIMIT[leg_index][joint];
         if (!std::isfinite(theta[joint])) {
             if (0.0f < limit.minimum_rad) {

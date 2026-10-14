@@ -37,8 +37,11 @@ void expectNear(float actual, float expected, float tolerance,
 
 constexpr float rad(float deg) { return deg * tilt::DEG2RAD; }
 
-const float kStand[tilt::NUM_JOINTS] = {0.0f, rad(-20.0f), rad(40.0f),
-                                        0.0f, rad(-20.0f), rad(40.0f)};
+const float kStand[tilt::NUM_JOINTS] = {0.0f, rad(-20.0f), rad(40.0f), rad(-20.0f),
+                                        0.0f, rad(-20.0f), rad(40.0f), rad(-20.0f)};
+
+// The MuJoCo reference has the old fixed foot; this ankle angle reproduces it.
+constexpr float kOldFootAnkle = tilt::model::SOLE_PITCH_AT_ZERO_RAD - tilt::ANKLE_FIXED_RAD;
 
 ImuSample level() {
     ImuSample imu;
@@ -53,8 +56,10 @@ void testComAgainstMujoco() {
         float theta[tilt::NUM_JOINTS];
         for (int j = 0; j < 3; ++j) {
             theta[j] = s.left_theta[j];
-            theta[3 + j] = s.right_theta[j];
+            theta[tilt::NUM_LEG_JOINTS + j] = s.right_theta[j];
         }
+        theta[tilt::L_ANKLE_PITCH] = kOldFootAnkle;
+        theta[tilt::R_ANKLE_PITCH] = kOldFootAnkle;
         const tilt::Vec3 c = tilt::estimation::center_of_mass(theta);
         const float dx = c.x - s.com_mm[0];
         const float dy = c.y - s.com_mm[1];

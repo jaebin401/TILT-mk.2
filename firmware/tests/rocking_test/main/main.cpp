@@ -88,14 +88,11 @@ bool s_custom_half_cycle_enabled = false;
 bool s_custom_pose_saved = false;
 
 JointArray standPose() {
-    return {
-        0.0f,
-        -20.0f * tilt::DEG2RAD,
-        +40.0f * tilt::DEG2RAD,
-        0.0f,
-        -20.0f * tilt::DEG2RAD,
-        +40.0f * tilt::DEG2RAD,
-    };
+    JointArray pose{};
+    for (int joint = 0; joint < tilt::NUM_JOINTS; ++joint) {
+        pose[joint] = tilt::ZERO_POSE_RAD[joint];
+    }
+    return pose;
 }
 
 const char* stateName(ControllerState state) {
@@ -155,7 +152,7 @@ float smoothstep5(float value) {
 
 bool withinLimits(const JointArray& command, int& bad_joint) {
     for (int joint = 0; joint < tilt::NUM_JOINTS; ++joint) {
-        const auto& limit = tilt::JOINT_LIMIT[joint / 3][joint % 3];
+        const auto& limit = tilt::jointLimit(joint);
         if (!std::isfinite(command[joint]) ||
             command[joint] < limit.minimum_rad ||
             command[joint] > limit.maximum_rad) {
@@ -369,7 +366,7 @@ void enterRollPoseEditor() {
 
 void adjustRollPose(int joint, float delta_rad) {
     if (s_state != ControllerState::kEditingRollPose) return;
-    const auto& limit = tilt::JOINT_LIMIT[joint / 3][joint % 3];
+    const auto& limit = tilt::jointLimit(joint);
     float* value = joint == tilt::L_HIP_ROLL
         ? &s_edit_left_roll_rad : &s_edit_right_roll_rad;
     *value = std::clamp(*value + delta_rad,

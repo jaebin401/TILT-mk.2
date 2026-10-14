@@ -38,6 +38,8 @@ struct RockingParameters {
     float right_swing_roll_rad = +8.0f * DEG2RAD;
     float lift_hip_delta_rad = -14.0f * DEG2RAD;
     float lift_knee_delta_rad = +14.0f * DEG2RAD;
+    // The ankle automatically cancels the net hip+knee pitch delta so the
+    // swing sole stays parallel even when these two values are not opposite.
 
     HipRollMode hip_roll_mode = HipRollMode::kPreset;
 

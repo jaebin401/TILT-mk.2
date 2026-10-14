@@ -5,6 +5,8 @@
 #include "JointMap.h"
 #include "PosePlayer.h"
 #include "PoseTable.h"
+#include "tilt/config/RobotConfig.h"
+#include "tilt/config/SafetyConfig.h"
 
 namespace {
 
@@ -43,12 +45,37 @@ float rad(float degrees) {
     return degrees * tilt::DEG2RAD;
 }
 
+void testEightJointConfiguration() {
+    constexpr char kTest[] = "T0 eight-joint configuration";
+    namespace robot = tilt::config::robot;
+    namespace safety = tilt::config::safety;
+
+    EXPECT_TRUE(kTest, robot::kJointCount == 8);
+    EXPECT_TRUE(kTest, robot::kServoIds[tilt::L_ANKLE_PITCH] == 14);
+    EXPECT_TRUE(kTest, robot::kServoIds[tilt::R_ANKLE_PITCH] == 24);
+    for (int joint = 0; joint < tilt::NUM_JOINTS; ++joint) {
+        EXPECT_TRUE(kTest,
+                    robot::kServoIds[joint] == tilt::SERVO_ID[joint]);
+        EXPECT_TRUE(kTest,
+                    robot::kServoCalibrations[joint].zero_ticks ==
+                        tilt::ZERO_TICK[joint]);
+        EXPECT_NEAR(kTest,
+                    safety::kJointPositionLimits[joint].minimum_radians,
+                    tilt::jointLimit(joint).minimum_rad,
+                    kFloatTolerance);
+        EXPECT_NEAR(kTest,
+                    safety::kJointPositionLimits[joint].maximum_radians,
+                    tilt::jointLimit(joint).maximum_rad,
+                    kFloatTolerance);
+    }
+}
+
 void testConversionRoundTrip() {
     constexpr char kTest[] = "T1 conversion round trip";
     const float tolerance = tilt::RAD_PER_TICK * 0.5001f;
 
     for (int joint = 0; joint < tilt::NUM_JOINTS; ++joint) {
-        const tilt::JointLimit& limit = tilt::JOINT_LIMIT[joint / 3][joint % 3];
+        const tilt::JointLimit& limit = tilt::jointLimit(joint);
         for (float angle = limit.minimum_rad;
              angle <= limit.maximum_rad + 1.0e-6f;
              angle += tilt::DEG2RAD) {
@@ -128,10 +155,10 @@ void testPoseLimitsAndFeet() {
 void testPoseSymmetry() {
     constexpr char kTest[] = "T4 pose symmetry";
     const auto stand = tilt::pose::standPose();
-    for (int joint = 0; joint < 3; ++joint) {
+    for (int joint = 0; joint < tilt::NUM_LEG_JOINTS; ++joint) {
         EXPECT_NEAR(kTest,
                     stand[joint],
-                    stand[joint + 3],
+                    stand[joint + tilt::NUM_LEG_JOINTS],
                     kFloatTolerance);
     }
 
@@ -154,19 +181,16 @@ void testPoseSymmetry() {
                 lift_right[tilt::R_KNEE_PITCH] - stand[tilt::R_KNEE_PITCH],
                 kFloatTolerance);
 
-    if (std::fabs(tilt::pose::kLiftHipDeltaDeg +
-                  tilt::pose::kLiftKneeDeltaDeg) <= kFloatTolerance) {
-        EXPECT_NEAR(kTest,
-                    tilt::pose::footPitchRad(lift_left, 0),
-                    tilt::pose::footPitchRad(
-                        tilt::pose::shiftPose(tilt::pose::Side::RIGHT), 0),
-                    kFloatTolerance);
-        EXPECT_NEAR(kTest,
-                    tilt::pose::footPitchRad(lift_right, 1),
-                    tilt::pose::footPitchRad(
-                        tilt::pose::shiftPose(tilt::pose::Side::LEFT), 1),
-                    kFloatTolerance);
-    }
+    EXPECT_NEAR(kTest,
+                tilt::pose::footPitchRad(lift_left, 0),
+                tilt::pose::footPitchRad(
+                    tilt::pose::shiftPose(tilt::pose::Side::RIGHT), 0),
+                kFloatTolerance);
+    EXPECT_NEAR(kTest,
+                tilt::pose::footPitchRad(lift_right, 1),
+                tilt::pose::footPitchRad(
+                    tilt::pose::shiftPose(tilt::pose::Side::LEFT), 1),
+                kFloatTolerance);
 }
 
 void testInterpolation() {
@@ -255,6 +279,7 @@ void testSequences() {
 }  // namespace
 
 int main() {
+    testEightJointConfiguration();
     testConversionRoundTrip();
     testZeroAndSign();
     testPoseLimitsAndFeet();

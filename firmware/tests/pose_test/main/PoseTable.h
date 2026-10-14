@@ -11,6 +11,7 @@ enum class Side { LEFT, RIGHT };
 inline constexpr float kStandRollDeg = 0.0f;
 inline constexpr float kStandHipDeg = -20.0f;
 inline constexpr float kStandKneeDeg = +40.0f;
+inline constexpr float kStandAnkleDeg = -20.0f;
 
 inline constexpr float kShiftRollDeg = 8.0f;
 inline constexpr float kLiftHipDeltaDeg = -15.0f;
@@ -33,7 +34,8 @@ inline JointArray standPose() {
     const float roll = degreesToRadians(kStandRollDeg);
     const float hip = degreesToRadians(kStandHipDeg);
     const float knee = degreesToRadians(kStandKneeDeg);
-    return {roll, hip, knee, roll, hip, knee};
+    const float ankle = degreesToRadians(kStandAnkleDeg);
+    return {roll, hip, knee, ankle, roll, hip, knee, ankle};
 }
 
 inline JointArray shiftPose(Side support) {
@@ -49,8 +51,11 @@ inline JointArray liftPose(Side support) {
     JointArray pose = shiftPose(support);
     const int swing_base = support == Side::RIGHT ? L_HIP_ROLL
                                                    : R_HIP_ROLL;
-    pose[swing_base + 1] += degreesToRadians(kLiftHipDeltaDeg);
-    pose[swing_base + 2] += degreesToRadians(kLiftKneeDeltaDeg);
+    const float hip_delta = degreesToRadians(kLiftHipDeltaDeg);
+    const float knee_delta = degreesToRadians(kLiftKneeDeltaDeg);
+    pose[swing_base + 1] += hip_delta;
+    pose[swing_base + 2] += knee_delta;
+    pose[swing_base + 3] -= hip_delta + knee_delta;
     return pose;
 }
 

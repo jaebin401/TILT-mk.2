@@ -29,7 +29,8 @@ def parse(path):
                 elif header and len(fields) == len(header):
                     rows.append(fields)
                 continue
-            if "EVT " in line or "== run:" in line or "STOP" in line:
+            if ("EVT " in line or "== run:" in line or "STOP" in line
+                    or line.startswith("FB") or "== feedback:" in line):
                 events.append(line)
     return header, rows, events
 

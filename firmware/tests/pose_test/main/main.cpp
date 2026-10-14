@@ -80,7 +80,7 @@ const char* postureName(Posture posture) {
 }
 
 const tilt::JointLimit& jointLimit(int joint) {
-    return tilt::JOINT_LIMIT[joint / 3][joint % 3];
+    return tilt::jointLimit(joint);
 }
 
 float radiansToDegrees(float radians) {
@@ -98,7 +98,7 @@ void printHelp() {
     std::printf("\nTILT mk.2 pose calibration test\n");
     std::printf("  o     : arm at the measured position\n");
     std::printf("  h     : HOME (all joints 0 rad)\n");
-    std::printf("  s     : STAND [0, -20, +40] deg\n");
+    std::printf("  s     : STAND [0, -20, +40, -20] deg\n");
     std::printf("  l     : LIFT_L (right support, lift left foot)\n");
     std::printf("  r     : LIFT_R (left support, lift right foot)\n");
     std::printf("  p     : print command/measured status\n");
@@ -107,8 +107,9 @@ void printHelp() {
     std::printf("  k / j : knee bend more / less  (knee pitch +step / -step)\n");
     std::printf("  z     : step size 0.5 -> 1.0 -> 0.1 deg\n");
     std::printf("  c     : print the tuned pose as code for standPose()\n");
-    std::printf("  u     : back to the table STAND [0, %+.1f, %+.1f]\n",
-                tilt::pose::kStandHipDeg, tilt::pose::kStandKneeDeg);
+    std::printf("  u     : back to table STAND [0, %+.1f, %+.1f, %+.1f]\n",
+                tilt::pose::kStandHipDeg, tilt::pose::kStandKneeDeg,
+                tilt::pose::kStandAnkleDeg);
     std::printf("  ?     : print this help\n");
     std::printf("  SPACE : emergency stop and torque OFF\n");
     std::printf("armed=%s posture=%s\n\n",
@@ -239,7 +240,8 @@ void armServos() {
         vTaskDelay(pdMS_TO_TICKS(3));
     }
     if (!all_read) {
-        std::printf("arm rejected: all six positions are required; torque stays OFF\n");
+        std::printf("arm rejected: all %u positions are required; torque stays OFF\n",
+                    static_cast<unsigned>(kJointCount));
         return;
     }
 
@@ -275,7 +277,7 @@ void armServos() {
 
 void queueCommand(PoseCommand command) {
     if (command == PoseCommand::HOME) {
-        std::printf("WARN: HOME fully extends the legs and tilts feet -20 deg; use only while suspended\n");
+        std::printf("WARN: HOME fully extends the legs; use only while suspended\n");
     }
     if (!s_armed) {
         std::printf("command rejected: press 'o' to arm first\n");
@@ -410,9 +412,13 @@ bool tuneReady() {
     return true;
 }
 
-// Symmetric sagittal pose: roll 0, the same hip/knee on both legs.
+// Symmetric sagittal pose with the ankle compensating to keep the sole flat.
 JointArray symmetricPose(float hip_rad, float knee_rad) {
-    return {0.0f, hip_rad, knee_rad, 0.0f, hip_rad, knee_rad};
+    const float ankle_rad = -(hip_rad + knee_rad +
+                              tilt::KNEE_OFFSET_RAD +
+                              tilt::ANKLE_FIXED_RAD);
+    return {0.0f, hip_rad, knee_rad, ankle_rad,
+            0.0f, hip_rad, knee_rad, ankle_rad};
 }
 
 void moveTo(const JointArray& target) {
@@ -456,9 +462,11 @@ void printTunedPose() {
     const JointArray q = s_player.lastCommand();
     const float hip = radiansToDegrees(q[tilt::L_HIP_PITCH]);
     const float knee = radiansToDegrees(q[tilt::L_KNEE_PITCH]);
+    const float ankle = radiansToDegrees(q[tilt::L_ANKLE_PITCH]);
 
     std::printf("\n=== tuned stand pose ===\n");
-    std::printf("command : hip %+.2f deg, knee %+.2f deg (both legs), roll 0\n", hip, knee);
+    std::printf("command : hip %+.2f deg, knee %+.2f deg, ankle %+.2f deg "
+                "(both legs), roll 0\n", hip, knee, ankle);
     std::printf("foot pitch vs torso: %+.2f deg  (0 = sole parallel to the torso; with the feet flat,\n"
                 "                     a negative value means the torso is pitched back by that much)\n",
                 radiansToDegrees(tilt::pose::footPitchRad(q, 0)));
@@ -476,14 +484,13 @@ void printTunedPose() {
         }
         std::printf("\n");
     }
-    std::printf("\n// firmware/components/tilt_dcm_gait/DcmStepping.cpp\n");
-    std::printf("JointArray standPose() {\n");
-    std::printf("    return {0.0f, %.2ff * DEG2RAD, %.2ff * DEG2RAD,\n", hip, knee);
-    std::printf("            0.0f, %.2ff * DEG2RAD, %.2ff * DEG2RAD};\n", hip, knee);
-    std::printf("}\n");
+    std::printf("\n// firmware/components/tilt_config/include/tilt_config.h\n");
+    std::printf("// ZERO_POSE_RAD per leg: {0.0f, %.2ff, %.2ff, %.2ff} * DEG2RAD\n",
+                hip, knee, ankle);
     std::printf("\n// firmware/tests/pose_test/main/PoseTable.h\n");
     std::printf("inline constexpr float kStandHipDeg = %.2ff;\n", hip);
     std::printf("inline constexpr float kStandKneeDeg = %+.2ff;\n\n", knee);
+    std::printf("inline constexpr float kStandAnkleDeg = %+.2ff;\n\n", ankle);
 }
 
 void handleInput(std::uint8_t input) {

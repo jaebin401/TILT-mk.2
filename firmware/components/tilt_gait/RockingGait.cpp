@@ -9,14 +9,11 @@ namespace {
 constexpr float kPi = 3.14159265358979323846f;
 
 JointArray standPose() {
-    return {
-        0.0f,
-        -20.0f * DEG2RAD,
-        +40.0f * DEG2RAD,
-        0.0f,
-        -20.0f * DEG2RAD,
-        +40.0f * DEG2RAD,
-    };
+    JointArray pose{};
+    for (int joint = 0; joint < NUM_JOINTS; ++joint) {
+        pose[joint] = ZERO_POSE_RAD[joint];
+    }
+    return pose;
 }
 
 Side opposite(Side side) {
@@ -189,6 +186,9 @@ RockingOutput RockingGait::sampleEvent(std::uint32_t event_time_ms) const {
         parameters_.lift_hip_delta_rad * lift_scale;
     result.position_rad[swing_base + 2] +=
         parameters_.lift_knee_delta_rad * lift_scale;
+    result.position_rad[swing_base + 3] -=
+        (parameters_.lift_hip_delta_rad +
+         parameters_.lift_knee_delta_rad) * lift_scale;
     return result;
 }
 

@@ -19,19 +19,23 @@ struct JointPositionLimit {
     float maximum_radians;
 };
 
-// Provisional conservative limits from the pose-test draft.
+// Same measured logical limits as the gait and pose paths.
 inline constexpr std::array<JointPositionLimit, robot::kJointCount>
     kJointPositionLimits = {{
-        {detail::degreesToRadians(-10.0f), detail::degreesToRadians(+10.0f)},
-        {detail::degreesToRadians(-35.0f), detail::degreesToRadians(+5.0f)},
-        {detail::degreesToRadians(-5.0f), detail::degreesToRadians(+40.0f)},
-        {detail::degreesToRadians(-10.0f), detail::degreesToRadians(+10.0f)},
-        {detail::degreesToRadians(-35.0f), detail::degreesToRadians(+5.0f)},
-        {detail::degreesToRadians(-5.0f), detail::degreesToRadians(+40.0f)},
+        {JOINT_LIMIT[0][0].minimum_rad, JOINT_LIMIT[0][0].maximum_rad},
+        {JOINT_LIMIT[0][1].minimum_rad, JOINT_LIMIT[0][1].maximum_rad},
+        {JOINT_LIMIT[0][2].minimum_rad, JOINT_LIMIT[0][2].maximum_rad},
+        {JOINT_LIMIT[0][3].minimum_rad, JOINT_LIMIT[0][3].maximum_rad},
+        {JOINT_LIMIT[1][0].minimum_rad, JOINT_LIMIT[1][0].maximum_rad},
+        {JOINT_LIMIT[1][1].minimum_rad, JOINT_LIMIT[1][1].maximum_rad},
+        {JOINT_LIMIT[1][2].minimum_rad, JOINT_LIMIT[1][2].maximum_rad},
+        {JOINT_LIMIT[1][3].minimum_rad, JOINT_LIMIT[1][3].maximum_rad},
     }};
 
 inline constexpr std::array<float, robot::kJointCount>
     kMaximumJointVelocityRadiansPerSecond = {
+        detail::degreesToRadians(35.0f),
+        detail::degreesToRadians(35.0f),
         detail::degreesToRadians(35.0f),
         detail::degreesToRadians(35.0f),
         detail::degreesToRadians(35.0f),

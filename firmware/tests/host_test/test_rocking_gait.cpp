@@ -16,7 +16,7 @@ void expect(bool condition, const char* message) {
 
 bool withinLimits(const tilt::gait::JointArray& q) {
     for (int joint = 0; joint < tilt::NUM_JOINTS; ++joint) {
-        const auto& limit = tilt::JOINT_LIMIT[joint / 3][joint % 3];
+        const auto& limit = tilt::jointLimit(joint);
         if (q[joint] < limit.minimum_rad - 1.0e-6f ||
             q[joint] > limit.maximum_rad + 1.0e-6f) {
             return false;
@@ -116,13 +116,19 @@ void testSwingFootPitchPreserved() {
     parameters.initial_settle_ms = 0;
     parameters.build_rock_halves = 0;
     parameters.lift_ramp_halves = 0;
+    parameters.lift_hip_delta_rad = -16.0f * tilt::DEG2RAD;
+    parameters.lift_knee_delta_rad = +12.0f * tilt::DEG2RAD;
     tilt::gait::RockingGait gait(parameters);
     gait.start(tilt::gait::Side::kLeft);
     const auto output = gait.update(parameters.half_cycle_ms / 2);
     const float right_sum = output.position_rad[tilt::R_HIP_PITCH] +
-                            output.position_rad[tilt::R_KNEE_PITCH];
-    expect(std::fabs(right_sum - 20.0f * tilt::DEG2RAD) < 1.0e-5f,
-           "swing hip+knee sum must preserve fixed-foot pitch");
+                            output.position_rad[tilt::R_KNEE_PITCH] +
+                            output.position_rad[tilt::R_ANKLE_PITCH];
+    expect(std::fabs(right_sum) < 1.0e-5f,
+           "swing hip+knee+ankle sum must preserve sole pitch");
+    expect(std::fabs(output.position_rad[tilt::R_ANKLE_PITCH] -
+                     -16.0f * tilt::DEG2RAD) < 1.0e-5f,
+           "ankle must cancel an unequal hip+knee lift delta");
     expect(output.position_rad[tilt::L_HIP_PITCH] == -20.0f * tilt::DEG2RAD,
            "stance pitch must remain at stand target");
 }
@@ -146,9 +152,10 @@ void testCustomLiftHeight() {
                      +60.0f * tilt::DEG2RAD) < 1.0e-5f,
            "custom lift must reach the configured knee-pitch height");
     const float right_sum = output.position_rad[tilt::R_HIP_PITCH] +
-                            output.position_rad[tilt::R_KNEE_PITCH];
-    expect(std::fabs(right_sum - 20.0f * tilt::DEG2RAD) < 1.0e-5f,
-           "custom lift must preserve the fixed-foot pitch");
+                            output.position_rad[tilt::R_KNEE_PITCH] +
+                            output.position_rad[tilt::R_ANKLE_PITCH];
+    expect(std::fabs(right_sum) < 1.0e-5f,
+           "custom lift must preserve sole pitch");
     expect(withinLimits(output.position_rad),
            "maximum custom lift must remain inside joint limits");
 }

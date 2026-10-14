@@ -30,13 +30,15 @@ struct KeyMap {
     std::int8_t direction;
 };
 
-constexpr std::array<KeyMap, 12> kKeyMap = {{
+constexpr std::array<KeyMap, 16> kKeyMap = {{
     {'q', 0, +1}, {'a', 0, -1},
     {'w', 1, +1}, {'s', 1, -1},
     {'e', 2, +1}, {'d', 2, -1},
     {'r', 3, +1}, {'f', 3, -1},
     {'t', 4, +1}, {'g', 4, -1},
     {'y', 5, +1}, {'h', 5, -1},
+    {'u', 6, +1}, {'j', 6, -1},
+    {'i', 7, +1}, {'k', 7, -1},
 }};
 
 tilt::sts3215::BusConfig makeBusConfig() {
@@ -102,37 +104,60 @@ void printHelp() {
                 s_armed ? "yes" : "no");
 }
 
-void refreshCurrentPositions() {
+float logicalDegrees(std::size_t index, std::uint16_t position) {
+    const auto& calibration =
+        tilt::config::robot::kServoCalibrations[index];
+    return static_cast<float>(calibration.direction) *
+           (static_cast<int>(position) -
+            static_cast<int>(calibration.zero_ticks)) *
+           360.0f / 4096.0f;
+}
+
+bool refreshCurrentPositions() {
+    bool all_read = true;
     for (std::size_t index = 0; index < kServoIds.size(); ++index) {
-        std::uint16_t position =
-            tilt::config::robot::kPositionReadFallbackTicks;
+        std::uint16_t position = 0;
         const esp_err_t result = s_bus.readPosition(kServoIds[index], position);
         if (result == ESP_OK) {
             ESP_LOGI(kTag,
-                     "servo %u present position: %u ticks (%.3f deg)",
+                     "servo %u present position: %u ticks (joint %+.3f deg)",
                      kServoIds[index],
                      position,
-                     tilt::sts3215::Sts3215Bus::ticksToDegrees(position));
+                     logicalDegrees(index, position));
+            s_current_position[index] = position;
         } else {
-            ESP_LOGW(kTag,
-                     "servo %u position read failed (%s); using %u locally",
+            ESP_LOGE(kTag,
+                     "servo %u position read failed (%s)",
                      kServoIds[index],
-                     esp_err_to_name(result),
-                     tilt::config::robot::kPositionReadFallbackTicks);
+                     esp_err_to_name(result));
+            all_read = false;
         }
-        s_current_position[index] = position;
         vTaskDelay(pdMS_TO_TICKS(10));
     }
+    return all_read;
 }
 
 void armServos() {
-    refreshCurrentPositions();
-    const esp_err_t result = s_bus.setTorqueAll(kServoIds.data(),
+    if (!refreshCurrentPositions()) {
+        s_armed = false;
+        ESP_LOGE(kTag, "arm rejected: all %u servo positions are required",
+                 static_cast<unsigned>(kServoIds.size()));
+        return;
+    }
+    esp_err_t result = s_bus.syncWritePositions(kServoIds.data(),
+                                                s_current_position.data(),
                                                 kServoIds.size(),
-                                                true);
+                                                0,
+                                                0);
+    if (result == ESP_OK) {
+        result = s_bus.setTorqueAll(kServoIds.data(),
+                                    kServoIds.size(),
+                                    true);
+    }
     s_armed = result == ESP_OK;
     if (s_armed) {
-        ESP_LOGI(kTag, "all six servos armed");
+        ESP_LOGI(kTag, "all %u servos armed",
+                 static_cast<unsigned>(kServoIds.size()));
     } else {
         ESP_LOGE(kTag, "failed to arm all servos: %s", esp_err_to_name(result));
     }
@@ -217,11 +242,17 @@ void moveServo(const KeyMap& mapping) {
     }
 
     const std::size_t index = mapping.servo_index;
+    const auto& calibration =
+        tilt::config::robot::kServoCalibrations[index];
     const std::int32_t requested =
         static_cast<std::int32_t>(s_current_position[index]) +
-        static_cast<std::int32_t>(mapping.direction) * currentStep();
-    const std::uint16_t position =
-        tilt::sts3215::Sts3215Bus::clampPosition(requested);
+        static_cast<std::int32_t>(mapping.direction) *
+        static_cast<std::int32_t>(calibration.direction) * currentStep();
+    const std::int32_t bounded =
+        requested < calibration.minimum_ticks ? calibration.minimum_ticks :
+        requested > calibration.maximum_ticks ? calibration.maximum_ticks :
+        requested;
+    const std::uint16_t position = static_cast<std::uint16_t>(bounded);
     const esp_err_t result = s_bus.writePosition(kServoIds[index],
                                                  position,
                                                  currentSpeed());
@@ -232,10 +263,10 @@ void moveServo(const KeyMap& mapping) {
         return;
     }
     s_current_position[index] = position;
-    std::printf("servo %u: position=%u ticks (%.3f deg) [%s]\n",
+    std::printf("servo %u: position=%u ticks (joint %+.3f deg) [%s]\n",
                 kServoIds[index],
                 position,
-                tilt::sts3215::Sts3215Bus::ticksToDegrees(position),
+                logicalDegrees(index, position),
                 currentModeName());
 }
 

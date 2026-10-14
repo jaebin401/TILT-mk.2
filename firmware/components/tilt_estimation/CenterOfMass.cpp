@@ -31,7 +31,7 @@ Vec3 center_of_mass(const float leg_theta[NUM_JOINTS],
 
     for (int leg = 0; leg < 2; ++leg) {
         const LegFrames frames =
-            fk_leg(static_cast<Leg>(leg), &leg_theta[leg * 3]);
+            fk_leg(static_cast<Leg>(leg), &leg_theta[leg * NUM_LEG_JOINTS]);
         acc.add(frames.hip, model::LEG_LINK[leg][0]);
         acc.add(frames.thigh, model::LEG_LINK[leg][1]);
         acc.add(frames.calf, model::LEG_LINK[leg][2]);
