@@ -1,5 +1,7 @@
 #include "tilt/dcm_gait/DcmStepping.h"
 
+#include <algorithm>
+
 namespace tilt::dcm_gait {
 namespace {
 
@@ -31,6 +33,14 @@ void addLift(JointArray& q, Side swing, float lift_rad, LiftMode mode) {
         q[base + 1] -= lift_rad;  // Hip pitch forward.
         q[base + 2] += lift_rad;  // Knee flexes: sole stays parallel.
     }
+}
+
+float smoothLiftProgress(std::uint32_t elapsed_ms, std::uint32_t duration_ms) {
+    if (duration_ms == 0) return 1.0f;
+    const float s = std::clamp(static_cast<float>(elapsed_ms) /
+                                   static_cast<float>(duration_ms),
+                               0.0f, 1.0f);
+    return s * s * s * (10.0f + s * (-15.0f + 6.0f * s));
 }
 
 const char* liftModeName(LiftMode mode) {
@@ -88,6 +98,8 @@ void DcmStepping::start(const DcmState* state) {
     command_ = Command{};
     command_.running = true;
     first_swing_ = true;
+    stop_after_landing_ = false;
+    landing_active_ = false;
     consecutive_fallbacks_ = 0;
     next_swing_ = params_.first_swing;
     if (params_.auto_first_swing && state != nullptr && state->valid) {
@@ -105,6 +117,7 @@ void DcmStepping::stop(StopReason reason) {
 }
 
 void DcmStepping::finish(StopReason reason) {
+    landing_active_ = false;
     command_.running = false;
     command_.phase = Phase::kIdle;
     command_.support = Support::kDouble;
@@ -118,6 +131,7 @@ void DcmStepping::finish(StopReason reason) {
 void DcmStepping::enterSwing(Side swing, Trigger trigger) {
     command_.phase = Phase::kSwing;
     command_.swing = swing;
+    next_swing_ = opposite(swing);
     command_.support = stanceSupport(swing);
     command_.phase_ms = 0;
     command_.last_trigger = trigger;
@@ -126,27 +140,52 @@ void DcmStepping::enterSwing(Side swing, Trigger trigger) {
 }
 
 void DcmStepping::enterDouble(Trigger trigger) {
+    landing_active_ = false;
     ++command_.steps;
     first_swing_ = false;
     next_swing_ = opposite(command_.swing);
-    if (params_.max_steps > 0 && command_.steps >= params_.max_steps) {
-        finish(StopReason::kStepLimit);
-        command_.last_trigger = trigger;
-        return;
-    }
     command_.phase = Phase::kDouble;
     command_.support = Support::kDouble;
     command_.phase_ms = 0;
     command_.last_trigger = trigger;
     command_.phase_changed = true;
+    stop_after_landing_ = params_.max_steps > 0 && command_.steps >= params_.max_steps;
     writePose();
+    // Preserve legacy immediate stop when no landing trajectory was requested.
+    if (stop_after_landing_ && params_.lift_fall_ms == 0) finish(StopReason::kStepLimit);
+}
+
+void DcmStepping::enterOpenLoopSwing(Side swing, Trigger trigger) {
+    ++command_.steps;
+    first_swing_ = false;
+    landing_side_ = command_.swing;
+    landing_active_ = params_.lift_fall_ms > 0;
+    enterSwing(swing, trigger);
 }
 
 void DcmStepping::writePose() {
     JointArray q = standPose();
+    std::array<float, 2> scale{};
     if (command_.phase == Phase::kSwing) {
-        addLift(q, command_.swing, params_.lift_deg * DEG2RAD, params_.lift_mode);
+        scale[legIndex(command_.swing)] =
+            smoothLiftProgress(command_.phase_ms, params_.lift_rise_ms);
+        if (params_.mode == Mode::kOpenLoop && params_.open_crossfade && landing_active_) {
+            scale[legIndex(landing_side_)] =
+                1.0f - smoothLiftProgress(command_.phase_ms, params_.lift_fall_ms);
+        }
+    } else if (command_.phase == Phase::kDouble && params_.lift_fall_ms > 0) {
+        // command_.swing still names the leg that has just touched down.
+        scale[legIndex(command_.swing)] =
+            1.0f - smoothLiftProgress(command_.phase_ms, params_.lift_fall_ms);
     }
+    for (const Side side : {Side::kLeft, Side::kRight}) {
+        const float leg_scale = scale[legIndex(side)];
+        if (leg_scale > 0.0f) {
+            addLift(q, side, params_.lift_deg * DEG2RAD * leg_scale, params_.lift_mode);
+        }
+    }
+    command_.lift_scale_by_leg = scale;
+    command_.lift_scale = scale[legIndex(command_.swing)];
     command_.position_rad = q;
 }
 
@@ -156,23 +195,70 @@ const Command& DcmStepping::update(const DcmState& state, std::uint32_t dt_ms) {
     command_.phase_ms += dt_ms;
     const std::uint32_t t = command_.phase_ms;
 
+    // A finite step count lands through the same synchronized trajectory before
+    // becoming idle. This is especially important for the single-lift commands.
+    if (command_.phase == Phase::kDouble && stop_after_landing_) {
+        if (t >= params_.lift_fall_ms) {
+            finish(StopReason::kStepLimit);
+        } else {
+            writePose();
+        }
+        return command_;
+    }
+
     if (params_.mode == Mode::kOpenLoop) {
-        if (command_.phase == Phase::kSwing && t >= params_.open_hold_ms) {
-            enterDouble(Trigger::kOpenLoopTimer);
-        } else if (command_.phase == Phase::kDouble) {
-            const std::uint32_t gap = params_.open_period_ms > params_.open_hold_ms
-                ? params_.open_period_ms - params_.open_hold_ms
-                : 0;
-            const std::uint32_t w = params_.lift_hint_window_ms;
-            const std::uint32_t early = gap > w ? gap - w : 0;
-            if (lift_hint_ == LiftHint::kNone) {
-                if (t >= gap) enterSwing(next_swing_, Trigger::kOpenLoopTimer);
-            } else if (lift_hint_ == LiftHint::kLift && t >= early) {
-                enterSwing(next_swing_, Trigger::kPhaseSync);
-            } else if (t >= gap + w) {
-                enterSwing(next_swing_, Trigger::kOpenLoopTimer);
+        if (!params_.open_crossfade) {
+            const std::uint32_t swing_ms =
+                std::max(params_.open_hold_ms, params_.lift_rise_ms);
+            if (command_.phase == Phase::kSwing && t >= swing_ms) {
+                enterDouble(Trigger::kOpenLoopTimer);
+            } else if (command_.phase == Phase::kDouble) {
+                const std::uint32_t gap = params_.open_period_ms > swing_ms
+                    ? params_.open_period_ms - swing_ms
+                    : 0;
+                const std::uint32_t w = params_.lift_hint_window_ms;
+                const std::uint32_t early = gap > w ? gap - w : 0;
+                if (lift_hint_ == LiftHint::kNone) {
+                    if (t >= std::max(gap, params_.lift_fall_ms)) {
+                        enterSwing(next_swing_, Trigger::kOpenLoopTimer);
+                    }
+                } else if (lift_hint_ == LiftHint::kLift &&
+                           t >= std::max(early, params_.lift_fall_ms)) {
+                    enterSwing(next_swing_, Trigger::kPhaseSync);
+                } else if (t >= std::max(gap + w, params_.lift_fall_ms)) {
+                    enterSwing(next_swing_, Trigger::kOpenLoopTimer);
+                }
+            }
+            writePose();
+            return command_;
+        }
+        if (command_.phase == Phase::kSwing) {
+            const bool final_swing = params_.max_steps > 0 &&
+                                     command_.steps + 1 >= params_.max_steps;
+            if (final_swing) {
+                const std::uint32_t hold =
+                    std::max(params_.open_hold_ms, params_.lift_rise_ms);
+                if (t >= hold) enterDouble(Trigger::kOpenLoopTimer);
+            } else {
+                // A crossfade cannot start before the current rise and the
+                // preceding landing can both finish inside one half-cycle.
+                const std::uint32_t period = std::max(
+                    params_.open_period_ms,
+                    std::max(params_.lift_rise_ms, params_.lift_fall_ms));
+                const std::uint32_t w = params_.lift_hint_window_ms;
+                const std::uint32_t earliest = std::max(
+                    period > w ? period - w : 0,
+                    std::max(params_.lift_rise_ms, params_.lift_fall_ms));
+                if (lift_hint_ == LiftHint::kLift && t >= earliest) {
+                    enterOpenLoopSwing(next_swing_, Trigger::kPhaseSync);
+                } else if (lift_hint_ == LiftHint::kNone && t >= period) {
+                    enterOpenLoopSwing(next_swing_, Trigger::kOpenLoopTimer);
+                } else if (lift_hint_ == LiftHint::kWait && t >= period + w) {
+                    enterOpenLoopSwing(next_swing_, Trigger::kOpenLoopTimer);
+                }
             }
         }
+        writePose();
         return command_;
     }
 
@@ -183,27 +269,35 @@ const Command& DcmStepping::update(const DcmState& state, std::uint32_t dt_ms) {
             return command_;
         }
         if (first_swing_) {
-            if (t >= params_.start_hold_ms) enterDouble(Trigger::kOpenLoopTimer);
+            if (t >= std::max(params_.start_hold_ms, params_.lift_rise_ms)) {
+                enterDouble(Trigger::kOpenLoopTimer);
+            }
+            writePose();
             return command_;
         }
-        if (t >= params_.swing_max_ms) {
+        const std::uint32_t swing_min = std::max(params_.swing_min_ms, params_.lift_rise_ms);
+        const std::uint32_t swing_max = std::max(params_.swing_max_ms, params_.lift_rise_ms);
+        if (t >= swing_max) {
             enterDouble(Trigger::kSwingTimeout);
-        } else if (t >= params_.swing_min_ms &&
+        } else if (t >= swing_min &&
                    dcmInsideSwingFoot(state, command_.swing) <=
                        params_.touchdown_dcm_inside_mm) {
             enterDouble(Trigger::kDcmTouchdown);
         }
+        writePose();
         return command_;
     }
 
     if (command_.phase == Phase::kDouble) {
         // The leg that just landed becomes the stance leg for the next swing.
         const int stance = legIndex(opposite(next_swing_));
-        if (t >= params_.double_min_ms &&
+        const std::uint32_t double_min = std::max(params_.double_min_ms, params_.lift_fall_ms);
+        const std::uint32_t double_max = std::max(params_.double_max_ms, params_.lift_fall_ms);
+        if (t >= double_min &&
             state.dcm_past_inner_edge_mm[stance] >= params_.lift_dcm_past_inner_mm) {
             consecutive_fallbacks_ = 0;
             enterSwing(next_swing_, Trigger::kDcmLift);
-        } else if (t >= params_.double_max_ms) {
+        } else if (t >= double_max) {
             if (consecutive_fallbacks_ >= params_.max_double_fallbacks) {
                 finish(StopReason::kDoubleTimeout);
             } else {
@@ -212,6 +306,7 @@ const Command& DcmStepping::update(const DcmState& state, std::uint32_t dt_ms) {
             }
         }
     }
+    writePose();
     return command_;
 }
 

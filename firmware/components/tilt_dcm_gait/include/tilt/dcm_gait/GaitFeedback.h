@@ -151,7 +151,12 @@ public:
                LiftMode lift_mode = LiftMode::kFlash) const;
 
     // Extra lift (deg, may be negative) for the swing side: ramp + layer 2.
+    // During a finite landing trajectory, this remains associated with the leg
+    // that has just landed so the feedback layer does not introduce a step.
     float extraLiftDeg(const Command& gait, float base_lift_deg) const;
+    // Same correction for a specific side. This also covers the leg that is
+    // descending during an open-loop crossfade.
+    float extraLiftDegForSide(const Command& gait, Side side, float base_lift_deg) const;
 
     // Layer 0: lift timing hint for DcmStepping::setLiftHint (open loop).
     LiftHint liftHint(const Command& gait) const;

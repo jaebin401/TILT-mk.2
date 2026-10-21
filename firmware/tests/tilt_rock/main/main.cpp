@@ -138,14 +138,17 @@ constexpr std::uint8_t kAddressAccelerationReg = 41;
 constexpr std::uint8_t kAddressAccelerationLimit = 85;
 constexpr std::uint8_t kAddressLock = 55;
 
-// Step response test: right hip/knee fold for 300 ms, then back, 600 ms total.
+// Synchronized trajectory test: right pitch chain up, hold, then down.
 constexpr std::uint32_t kStepTestHoldMs = 300;
 constexpr std::uint32_t kStepTestTotalMs = 600;
 constexpr int kStepTestSamples = kStepTestTotalMs / kControlPeriodMs;
+constexpr int kPitchAxisCount = 3;
+constexpr int kRightPitchJoint[kPitchAxisCount] = {
+    tilt::R_HIP_PITCH, tilt::R_KNEE_PITCH, tilt::R_ANKLE_PITCH};
+constexpr const char* kPitchAxisName[kPitchAxisCount] = {"hip", "knee", "ankle"};
 struct StepSample {
-    float cmd_knee_deg;
-    float meas_knee_deg;
-    float meas_hip_deg;
+    float cmd_deg[kPitchAxisCount];
+    float meas_deg[kPitchAxisCount];
     float volt;
 };
 StepSample s_step_log[kStepTestSamples];
@@ -301,10 +304,12 @@ void configureEstimator() {
 void printParams() {
     const gait::Params& p = s_params;
     std::printf(
-        "params: lift=%.0fdeg (%s) max_steps=%lu | DCM: touchdown_inside=%.0fmm "
+        "params: lift=%.0fdeg (%s) trajectory up/down=%lu/%lums max_steps=%lu | DCM: touchdown_inside=%.0fmm "
         "lift_past_inner=%+.0fmm swing=%lu..%lums double=%lu..%lums start_hold=%lums "
         "abort_outer=%.0fmm fallbacks=%lu auto_first=%s | open-loop: hold=%lums period=%lums\n",
-        p.lift_deg, gait::liftModeName(p.lift_mode), static_cast<unsigned long>(p.max_steps),
+        p.lift_deg, gait::liftModeName(p.lift_mode),
+        static_cast<unsigned long>(p.lift_rise_ms),
+        static_cast<unsigned long>(p.lift_fall_ms), static_cast<unsigned long>(p.max_steps),
         p.touchdown_dcm_inside_mm,
         p.lift_dcm_past_inner_mm, static_cast<unsigned long>(p.swing_min_ms),
         static_cast<unsigned long>(p.swing_max_ms),
@@ -734,67 +739,124 @@ void startStepTest() {
     }
     s_step_elapsed_ms = 0;
     s_state = ControllerState::kStepTest;
-    std::printf("step test: right leg %s lift %.0f deg for %lu ms (",
+    std::printf("trajectory test: right leg %s lift %.0f deg, up/down %lu/%lu ms, hold to %lu ms (",
                 gait::liftModeName(s_params.lift_mode), static_cast<double>(s_params.lift_deg),
+                static_cast<unsigned long>(s_params.lift_rise_ms),
+                static_cast<unsigned long>(s_params.lift_fall_ms),
                 static_cast<unsigned long>(kStepTestHoldMs));
     printServoSettings();
 }
 
 void updateStepTest() {
     JointArray q = standPose();
+    float lift_scale = 0.0f;
     if (s_step_elapsed_ms < kStepTestHoldMs) {
-        gait::addLift(q, gait::Side::kRight, s_params.lift_deg * tilt::DEG2RAD, s_params.lift_mode);
+        lift_scale = gait::smoothLiftProgress(s_step_elapsed_ms, s_params.lift_rise_ms);
+    } else if (s_step_elapsed_ms < kStepTestHoldMs + s_params.lift_fall_ms) {
+        lift_scale = 1.0f - gait::smoothLiftProgress(
+                                s_step_elapsed_ms - kStepTestHoldMs, s_params.lift_fall_ms);
+    }
+    if (lift_scale > 0.0f) {
+        gait::addLift(q, gait::Side::kRight,
+                      s_params.lift_deg * tilt::DEG2RAD * lift_scale,
+                      s_params.lift_mode);
     }
     s_command = q;
     const int k = static_cast<int>(s_step_elapsed_ms / kControlPeriodMs);
     if (k < kStepTestSamples) {
         std::uint8_t v = 0;
         const bool ok = s_bus.readRegister(tilt::SERVO_ID[tilt::R_KNEE_PITCH], kAddressPresentVoltage, &v, 1) == ESP_OK;
-        s_step_log[k] = {q[tilt::R_KNEE_PITCH] * kRadToDeg, s_measured[tilt::R_KNEE_PITCH] * kRadToDeg,
-                         s_measured[tilt::R_HIP_PITCH] * kRadToDeg, ok ? v * 0.1f : NAN};
+        for (int axis = 0; axis < kPitchAxisCount; ++axis) {
+            const int joint = kRightPitchJoint[axis];
+            s_step_log[k].cmd_deg[axis] = q[joint] * kRadToDeg;
+            s_step_log[k].meas_deg[axis] = s_measured[joint] * kRadToDeg;
+        }
+        s_step_log[k].volt = ok ? v * 0.1f : NAN;
     }
     s_step_elapsed_ms += kControlPeriodMs;
     if (s_step_elapsed_ms < kStepTestTotalMs) return;
 
     s_state = ControllerState::kStanding;
     s_command = standPose();
-    const float start = s_step_log[0].meas_knee_deg;
-    // Knee travel: L (flash) or 2L (vertical).
-    const float target = s_params.lift_deg * (s_params.lift_mode == gait::LiftMode::kVertical ? 2.0f : 1.0f);
-    int dead = -1, t50 = -1, t90 = -1;
-    float peak = 0.0f, vmin = 99.0f;
+    const float target_delta[kPitchAxisCount] = {
+        -s_params.lift_deg,
+        s_params.lift_deg * (s_params.lift_mode == gait::LiftMode::kVertical ? 2.0f : 1.0f),
+        s_params.lift_mode == gait::LiftMode::kVertical ? -s_params.lift_deg : 0.0f};
+    int dead[kPitchAxisCount] = {-1, -1, -1};
+    int t50[kPitchAxisCount] = {-1, -1, -1};
+    int t90[kPitchAxisCount] = {-1, -1, -1};
+    float peak[kPitchAxisCount] = {0.0f, 0.0f, 0.0f};
+    float vmin = 99.0f;
     for (int i = 0; i < kStepTestSamples; ++i) {
-        const float d = s_step_log[i].meas_knee_deg - start;
-        if (i * static_cast<int>(kControlPeriodMs) < static_cast<int>(kStepTestHoldMs)) {
-            if (dead < 0 && d > 0.5f) dead = i * kControlPeriodMs;
-            if (t50 < 0 && d > 0.5f * target) t50 = i * kControlPeriodMs;
-            if (t90 < 0 && d > 0.9f * target) t90 = i * kControlPeriodMs;
+        const int time_ms = i * static_cast<int>(kControlPeriodMs);
+        for (int axis = 0; axis < kPitchAxisCount; ++axis) {
+            if (std::fabs(target_delta[axis]) < 1e-4f) continue;
+            const float direction = target_delta[axis] > 0.0f ? 1.0f : -1.0f;
+            const float travel = direction *
+                (s_step_log[i].meas_deg[axis] - s_step_log[0].meas_deg[axis]);
+            const float target = std::fabs(target_delta[axis]);
+            if (time_ms < static_cast<int>(kStepTestHoldMs)) {
+                if (dead[axis] < 0 && travel > 0.5f) dead[axis] = time_ms;
+                if (t50[axis] < 0 && travel > 0.5f * target) t50[axis] = time_ms;
+                if (t90[axis] < 0 && travel > 0.9f * target) t90[axis] = time_ms;
+            }
+            peak[axis] = std::max(peak[axis], travel);
         }
-        peak = std::max(peak, d);
         if (std::isfinite(s_step_log[i].volt)) vmin = std::min(vmin, s_step_log[i].volt);
     }
-    std::printf("t_ms  cmd_knee  meas_knee  meas_hip  volt\n");
+    std::printf("t_ms  cmd_hip meas_hip  cmd_knee meas_knee  cmd_ankle meas_ankle  volt\n");
     for (int i = 0; i < kStepTestSamples; i += 2) {
-        std::printf("%4d  %7.1f  %8.1f  %8.1f  %4.1f\n", i * static_cast<int>(kControlPeriodMs),
-                    static_cast<double>(s_step_log[i].cmd_knee_deg),
-                    static_cast<double>(s_step_log[i].meas_knee_deg),
-                    static_cast<double>(s_step_log[i].meas_hip_deg),
+        std::printf("%4d  %7.1f %8.1f  %8.1f %9.1f  %9.1f %10.1f  %4.1f\n",
+                    i * static_cast<int>(kControlPeriodMs),
+                    static_cast<double>(s_step_log[i].cmd_deg[0]),
+                    static_cast<double>(s_step_log[i].meas_deg[0]),
+                    static_cast<double>(s_step_log[i].cmd_deg[1]),
+                    static_cast<double>(s_step_log[i].meas_deg[1]),
+                    static_cast<double>(s_step_log[i].cmd_deg[2]),
+                    static_cast<double>(s_step_log[i].meas_deg[2]),
                     static_cast<double>(s_step_log[i].volt));
     }
-    std::printf("STEP RESULT acc=%u speed=%u: dead time %d ms, 50%% at %d ms, 90%% at %d ms, "
-                "peak %.1f/%.0f deg, min voltage %.1f V  (-1 = not reached)\n\n",
+    std::printf("TRAJECTORY RESULT acc=%u speed=%u, min voltage %.1f V (-1 = not reached):\n",
                 static_cast<unsigned>(kAccOptions[s_acc_index]),
-                static_cast<unsigned>(kSpeedOptions[s_speed_index]), dead, t50, t90,
-                static_cast<double>(peak), static_cast<double>(target), static_cast<double>(vmin));
+                static_cast<unsigned>(kSpeedOptions[s_speed_index]), static_cast<double>(vmin));
+    int t90_min = 1000000;
+    int t90_max = -1;
+    int active_axes = 0;
+    int reached_axes = 0;
+    for (int axis = 0; axis < kPitchAxisCount; ++axis) {
+        if (std::fabs(target_delta[axis]) < 1e-4f) {
+            std::printf("  %-5s fixed (target 0 deg)\n", kPitchAxisName[axis]);
+        } else {
+            ++active_axes;
+            if (t90[axis] >= 0) {
+                ++reached_axes;
+                t90_min = std::min(t90_min, t90[axis]);
+                t90_max = std::max(t90_max, t90[axis]);
+            }
+            std::printf("  %-5s dead=%d ms  t50=%d ms  t90=%d ms  peak=%.1f/%.0f deg\n",
+                        kPitchAxisName[axis], dead[axis], t50[axis], t90[axis],
+                        static_cast<double>(peak[axis]),
+                        static_cast<double>(std::fabs(target_delta[axis])));
+        }
+    }
+    if (reached_axes == active_axes) {
+        std::printf("  t90 spread=%d ms (smaller is better).\n\n", t90_max - t90_min);
+    } else {
+        std::printf("  t90 spread unavailable: %d/%d moving axes reached 90%%.\n\n",
+                    reached_axes, active_axes);
+    }
 }
 
 void adjustHold(int delta_ms) {
     if (!idleForEdit()) return;
-    const int value = std::clamp(static_cast<int>(s_params.open_hold_ms) + delta_ms, 60, 300);
+    const int min_hold = std::max(60, static_cast<int>(s_params.lift_rise_ms));
+    const int value = std::clamp(static_cast<int>(s_params.open_hold_ms) + delta_ms,
+                                 min_hold, 300);
     s_params.open_hold_ms = static_cast<std::uint32_t>(value);
     s_params.start_hold_ms = static_cast<std::uint32_t>(value);
-    if (s_params.open_period_ms < s_params.open_hold_ms + 20) {
-        s_params.open_period_ms = s_params.open_hold_ms + 20;
+    const std::uint32_t min_period = s_params.open_hold_ms + s_params.lift_fall_ms;
+    if (s_params.open_period_ms < min_period) {
+        s_params.open_period_ms = min_period;
     }
     printParams();
 }
@@ -802,7 +864,9 @@ void adjustHold(int delta_ms) {
 void adjustPeriod(int delta_ms) {
     if (!idleForEdit()) return;
     const int value = static_cast<int>(s_params.open_period_ms) + delta_ms;
-    s_params.open_period_ms = static_cast<std::uint32_t>(std::clamp(value, 120, 600));
+    const int min_period = std::max(120, static_cast<int>(s_params.open_hold_ms +
+                                                          s_params.lift_fall_ms));
+    s_params.open_period_ms = static_cast<std::uint32_t>(std::clamp(value, min_period, 600));
     printParams();
 }
 
@@ -1254,6 +1318,10 @@ extern "C" void app_main() {
     // only holds the sole flat. 'V' switches to the vertical lift.
     s_params.lift_mode = gait::LiftMode::kFlash;
     s_params.lift_deg = 15.0f;
+    // Hip, knee, and ankle pitch use one normalized quintic trajectory so all
+    // commanded joint targets are reached at the same instant.
+    s_params.lift_rise_ms = 120;
+    s_params.lift_fall_ms = 120;
     // Measured STS3215 response with reg85 = 254: 40-60 ms dead time, 15 deg
     // reaches 90 % at ~170 ms. Hold the swing long enough for the fold.
     s_params.open_hold_ms = 150;

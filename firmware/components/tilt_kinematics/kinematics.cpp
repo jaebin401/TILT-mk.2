@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <initializer_list>
 
 #include "tilt/kinematics/RobotModel.h"
 
@@ -72,6 +73,11 @@ float wrap_pi(float angle) {
     return std::remainder(angle, 2.0f * PI_RAD);
 }
 
+float angle_distance_squared(float a, float b) {
+    const float delta = wrap_pi(a - b);
+    return delta * delta;
+}
+
 // Foot rotation about the ankle axis relative to the URDF's fixed foot.
 constexpr float kAnkleModelOffsetRad = ANKLE_FIXED_RAD - model::SOLE_PITCH_AT_ZERO_RAD;
 
@@ -87,6 +93,7 @@ struct SagittalChain {
     float thigh[2];
     float shank[2];
     float foot[2];
+    float lateral;
 };
 
 LegFrames fk_leg_impl(int i, const float theta[NUM_LEG_JOINTS]);
@@ -103,7 +110,10 @@ const SagittalChain& sagittal_chain(int i) {
             const Vec3 k = f.calf.p;
             const Vec3 a = f.ankle.p;
             const Vec3 s = f.sole.p;
-            chains[leg] = {{k.x - h.x, k.z - h.z}, {a.x - k.x, a.z - k.z}, {s.x - a.x, s.z - a.z}};
+            chains[leg] = {{k.x - h.x, k.z - h.z},
+                           {a.x - k.x, a.z - k.z},
+                           {s.x - a.x, s.z - a.z},
+                           s.y - h.y};
         }
         ready = true;
     }
@@ -123,9 +133,14 @@ LegFrames fk_leg_impl(int i, const float theta[NUM_LEG_JOINTS]) {
     frames.ankle.R = multiply(frames.calf.R,
                               axis_angle(model::LEG_JOINT[i][2].axis,
                                          theta[3] + kAnkleModelOffsetRad));
-    const float* o = model::SOLE_FIXED[i].origin_mm;
-    frames.sole.p = transform_point(frames.ankle, {o[0] - a.x, o[1] - a.y, o[2] - a.z});
     frames.sole.R = multiply(frames.ankle.R, from_array(model::SOLE_FIXED[i].rotation));
+    // FOOT_LENGTH_MM is the measured perpendicular distance from the ankle
+    // axis to the contact plane, not the old URDF's fixed-foot origin.
+    const float sole_offset[3] = {0.0f, 0.0f, -FOOT_LENGTH_MM};
+    const Vec3 offset = rotate(frames.sole.R, sole_offset);
+    frames.sole.p = {frames.ankle.p.x + offset.x,
+                     frames.ankle.p.y + offset.y,
+                     frames.ankle.p.z + offset.z};
     return frames;
 }
 
@@ -173,7 +188,8 @@ IkResult ik_foot(Leg leg, const Vec3& sole_target, float sole_pitch) {
 
     // Frontal plane: in the roll frame the sole sits at (y', z') = (d, zp)
     // with a constant lateral offset d, so |(ry, rz)| = |(d, zp)|.
-    const float d = model::SOLE_LATERAL_MM[i];
+    const SagittalChain& chain = sagittal_chain(i);
+    const float d = chain.lateral;
     float rho = std::sqrt(ry * ry + rz * rz);
     const float rho_min = std::fabs(d) + REACH_CLAMP_EPS_MM;
     if (rho < rho_min) {
@@ -188,7 +204,6 @@ IkResult ik_foot(Leg leg, const Vec3& sole_target, float sole_pitch) {
     // The foot vector (ankle axis -> sole) is rotated by the total pitch
     // phi = hip + knee + ankle; subtract it to get the ankle-axis target, then
     // solve the two-link (thigh, shank) problem for it.
-    const SagittalChain& chain = sagittal_chain(i);
     const float phi = sole_pitch - ANKLE_FIXED_RAD;
     const float cphi = std::cos(phi);
     const float sphi = std::sin(phi);
@@ -238,6 +253,107 @@ IkResult ik_foot(Leg leg, const Vec3& sole_target, float sole_pitch) {
     const float ankle = wrap_pi(phi - hip - knee);
 
     return {{roll, hip, knee, ankle}, reachable};
+}
+
+IkResult ik_foot_fixed_hip_pitch(Leg leg, const Vec3& sole_target,
+                                 float hip_roll, float hip_pitch,
+                                 float knee_hint, float ankle_hint) {
+    if (!std::isfinite(sole_target.x) || !std::isfinite(sole_target.y) ||
+        !std::isfinite(sole_target.z) || !std::isfinite(hip_roll) ||
+        !std::isfinite(hip_pitch) || !std::isfinite(knee_hint) ||
+        !std::isfinite(ankle_hint)) {
+        return {{hip_roll, hip_pitch, 0.0f, 0.0f}, false};
+    }
+
+    // Preserve an exact captured HOME/STAND reference, including the fully
+    // extended HOME singularity where the two analytic branches coincide.
+    const float seed[NUM_LEG_JOINTS] = {
+        hip_roll, hip_pitch, knee_hint, ankle_hint};
+    const Vec3 seed_foot = fk_foot(leg, seed);
+    const float seed_dx = seed_foot.x - sole_target.x;
+    const float seed_dy = seed_foot.y - sole_target.y;
+    const float seed_dz = seed_foot.z - sole_target.z;
+    if (std::sqrt(seed_dx * seed_dx + seed_dy * seed_dy +
+                  seed_dz * seed_dz) <= 0.001f) {
+        return {{hip_roll, hip_pitch, knee_hint, ankle_hint}, true};
+    }
+
+    const int i = static_cast<int>(leg);
+    const SagittalChain& chain = sagittal_chain(i);
+
+    // Target relative to the hip point, then undo the fixed hip-roll. A valid
+    // sagittal target must land in the leg plane at the chain's lateral offset.
+    const float rx = sole_target.x - model::HIP_POINT_MM[i][0];
+    const float ry = sole_target.y - model::HIP_POINT_MM[i][1];
+    const float rz = sole_target.z - model::HIP_POINT_MM[i][2];
+    const float cr = std::cos(hip_roll);
+    const float sr = std::sin(hip_roll);
+    const float plane_y = cr * ry + sr * rz;
+    const float plane_z = -sr * ry + cr * rz;
+    bool reachable = std::fabs(plane_y - chain.lateral) <= 0.5f;
+
+    // Undo the fixed hip pitch and remove the thigh. The remaining vector is
+    // reached by the shank and the ankle-to-sole link, a planar two-link arm.
+    const float ch = std::cos(hip_pitch);
+    const float sh = std::sin(hip_pitch);
+    const float target_x = ch * rx - sh * plane_z - chain.thigh[0];
+    const float target_z = sh * rx + ch * plane_z - chain.thigh[1];
+
+    const float shank_angle = std::atan2(chain.shank[1], chain.shank[0]);
+    const float foot_angle = std::atan2(chain.foot[1], chain.foot[0]);
+    const float shank_length = std::hypot(chain.shank[0], chain.shank[1]);
+    const float foot_length = std::hypot(chain.foot[0], chain.foot[1]);
+
+    float distance = std::hypot(target_x, target_z);
+    const float min_reach = std::fabs(shank_length - foot_length);
+    const float max_reach = shank_length + foot_length;
+    float px = target_x;
+    float pz = target_z;
+    const float clamped_distance =
+        std::fmax(min_reach, std::fmin(max_reach, distance));
+    if (clamped_distance != distance) {
+        // FK round-off can put an exactly straight reference pose a few
+        // micrometres beyond the analytic boundary. Accept that tolerance,
+        // but still project the value used by acos onto the valid interval.
+        if (distance < min_reach - 0.01f || distance > max_reach + 0.01f) {
+            reachable = false;
+        }
+        if (distance > 0.0f) {
+            px *= clamped_distance / distance;
+            pz *= clamped_distance / distance;
+        } else {
+            px = clamped_distance;
+            pz = 0.0f;
+        }
+        distance = clamped_distance;
+    }
+
+    float cosine = (distance * distance - shank_length * shank_length -
+                    foot_length * foot_length) /
+                   (2.0f * shank_length * foot_length);
+    cosine = std::fmax(-1.0f, std::fmin(1.0f, cosine));
+    const float gamma_abs = std::acos(cosine);
+    const float target_angle = std::atan2(pz, px);
+
+    float best_knee = 0.0f;
+    float best_ankle = 0.0f;
+    float best_cost = INFINITY;
+    for (const float gamma : {gamma_abs, -gamma_abs}) {
+        const float shank_world_angle = target_angle -
+            std::atan2(foot_length * std::sin(gamma),
+                       shank_length + foot_length * std::cos(gamma));
+        const float knee = wrap_pi(shank_angle - shank_world_angle);
+        const float ankle = wrap_pi(foot_angle - shank_angle - gamma);
+        const float cost = angle_distance_squared(knee, knee_hint) +
+                           angle_distance_squared(ankle, ankle_hint);
+        if (cost < best_cost) {
+            best_cost = cost;
+            best_knee = knee;
+            best_ankle = ankle;
+        }
+    }
+
+    return {{hip_roll, hip_pitch, best_knee, best_ankle}, reachable};
 }
 
 bool clamp_to_limits(Leg leg, float theta[NUM_LEG_JOINTS]) {

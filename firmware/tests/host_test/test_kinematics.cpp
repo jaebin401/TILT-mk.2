@@ -12,7 +12,6 @@
 
 namespace {
 
-constexpr float kFkToleranceMm = 0.05f;
 constexpr float kRotationTolerance = 1.0e-4f;
 constexpr float kRoundTripRad = 1.0e-3f;
 constexpr float kRoundTripMm = 0.01f;
@@ -41,8 +40,9 @@ void expectNear(float actual, float expected, float tolerance,
 
 constexpr float rad(float degrees) { return degrees * tilt::DEG2RAD; }
 
-// The MuJoCo reference (and the URDF) has the old fixed foot; this ankle angle
-// reproduces it with the ankle model (tilt_kinematics.h).
+// The MuJoCo reference has the old fixed foot. This angle reproduces its sole
+// orientation; the sole position intentionally differs because the measured
+// ankle-to-contact-plane distance now replaces the old fixed-foot location.
 constexpr float kOldFootAnkle = tilt::model::SOLE_PITCH_AT_ZERO_RAD - tilt::ANKLE_FIXED_RAD;
 
 float distance(const tilt::Vec3& a, const tilt::Vec3& b) {
@@ -54,18 +54,14 @@ float distance(const tilt::Vec3& a, const tilt::Vec3& b) {
 
 void testForwardKinematicsAgainstMujoco() {
     constexpr char kTest[] = "T1 FK vs MuJoCo";
-    float worst_mm = 0.0f;
     float worst_rot = 0.0f;
     for (const auto& sample : kinematics_reference::SAMPLES) {
         for (const tilt::Leg leg : {tilt::Leg::LEFT, tilt::Leg::RIGHT}) {
             const bool left = leg == tilt::Leg::LEFT;
             const float* t3 = left ? sample.left_theta : sample.right_theta;
             const float theta[] = {t3[0], t3[1], t3[2], kOldFootAnkle};
-            const float* sole = left ? sample.left_sole_mm : sample.right_sole_mm;
             const auto& rotation = left ? sample.left_sole_R : sample.right_sole_R;
             const tilt::LegFrames frames = tilt::fk_leg(leg, theta);
-            const float error = distance(frames.sole.p, {sole[0], sole[1], sole[2]});
-            if (error > worst_mm) worst_mm = error;
             for (int r = 0; r < 3; ++r) {
                 for (int c = 0; c < 3; ++c) {
                     const float e = std::fabs(frames.sole.R.m[r][c] - rotation[r][c]);
@@ -74,12 +70,26 @@ void testForwardKinematicsAgainstMujoco() {
             }
         }
     }
-    std::printf("[%s] %zu samples, worst position %.4f mm, worst rotation %.2e\n",
+    std::printf("[%s] %zu samples, worst sole rotation %.2e\n",
                 kTest, sizeof(kinematics_reference::SAMPLES) /
                            sizeof(kinematics_reference::SAMPLES[0]),
-                worst_mm, worst_rot);
-    EXPECT_TRUE(kTest, worst_mm <= kFkToleranceMm);
+                worst_rot);
     EXPECT_TRUE(kTest, worst_rot <= kRotationTolerance);
+}
+
+void testMeasuredAnkleToSoleDistance() {
+    constexpr char kTest[] = "T8 measured ankle -> contact plane";
+    const float theta[] = {0.0f, rad(-20.0f), rad(+40.0f), rad(-20.0f)};
+    for (const tilt::Leg leg : {tilt::Leg::LEFT, tilt::Leg::RIGHT}) {
+        const tilt::LegFrames frames = tilt::fk_leg(leg, theta);
+        EXPECT_NEAR(kTest, distance(frames.ankle.p, frames.sole.p),
+                    tilt::FOOT_LENGTH_MM, 1.0e-4f);
+        // The stand sole is flat, so the measured perpendicular is world -z.
+        EXPECT_NEAR(kTest, frames.sole.p.x, frames.ankle.p.x, 1.0e-3f);
+        EXPECT_NEAR(kTest, frames.sole.p.y, frames.ankle.p.y, 1.0e-3f);
+        EXPECT_NEAR(kTest, frames.sole.p.z,
+                    frames.ankle.p.z - tilt::FOOT_LENGTH_MM, 1.0e-3f);
+    }
 }
 
 void testStandPose() {
@@ -211,6 +221,37 @@ void testClampToLimits() {
     EXPECT_NEAR(kTest, outside[3], tilt::JOINT_LIMIT[1][3].minimum_rad, 1e-6f);
 }
 
+void testFixedHipPitchIkRoundTrip() {
+    constexpr char kTest[] = "T9 fixed hip-pitch IK";
+    int count = 0;
+    float worst_mm = 0.0f;
+    for (const tilt::Leg leg : {tilt::Leg::LEFT, tilt::Leg::RIGHT}) {
+        for (int hip = -30; hip <= 0; hip += 10) {
+            for (int knee = 20; knee <= 60; knee += 10) {
+                for (int ankle = -45; ankle <= 5; ankle += 10) {
+                    const float q[] = {0.0f, rad(static_cast<float>(hip)),
+                                       rad(static_cast<float>(knee)),
+                                       rad(static_cast<float>(ankle))};
+                    const tilt::Vec3 target = tilt::fk_foot(leg, q);
+                    const tilt::IkResult result =
+                        tilt::ik_foot_fixed_hip_pitch(
+                            leg, target, q[0], q[1], q[2], q[3]);
+                    EXPECT_TRUE(kTest, result.reachable);
+                    EXPECT_NEAR(kTest, result.theta[0], q[0], kRoundTripRad);
+                    EXPECT_NEAR(kTest, result.theta[1], q[1], kRoundTripRad);
+                    const tilt::Vec3 solved = tilt::fk_foot(leg, result.theta);
+                    const float error = distance(target, solved);
+                    if (error > worst_mm) worst_mm = error;
+                    ++count;
+                }
+            }
+        }
+    }
+    std::printf("[%s] %d poses, worst position %.4f mm\n",
+                kTest, count, worst_mm);
+    EXPECT_TRUE(kTest, worst_mm <= kRoundTripMm);
+}
+
 }  // namespace
 
 int main() {
@@ -221,6 +262,8 @@ int main() {
     testSignConventions();
     testLeftRightSymmetry();
     testClampToLimits();
+    testMeasuredAnkleToSoleDistance();
+    testFixedHipPitchIkRoundTrip();
 
     if (s_failures == 0) {
         std::printf("All kinematics tests passed.\n");

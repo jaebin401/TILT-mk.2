@@ -176,6 +176,65 @@ void testRampAndApply() {
                               fade * r.fb.state().lift_delta_deg[c.swing == Side::kLeft ? 0 : 1]) < 1e-6f);
 }
 
+void testFeedbackFollowsLandingTrajectory() {
+    constexpr char kT[] = "F12 lift feedback stays continuous through landing";
+    Params gp = openLoop();
+    gp.lift_rise_ms = 100;
+    gp.lift_fall_ms = 100;
+    gp.max_steps = 1;
+    FeedbackParams fp;
+    fp.ramp_steps = 3;
+    DcmStepping gait(gp);
+    GaitFeedback fb(fp);
+    DcmState state;
+    const JointArray stand = standPose();
+    gait.start();
+    gait.update(state, 100);  // Full commanded lift; ramp reduces it to 1/4.
+    JointArray q = gait.command().position_rad;
+    fb.apply(q, gait.command(), FeedbackContext::kStepping, gp.lift_deg);
+    EXPECT_TRUE(kT, std::fabs(q[tilt::R_KNEE_PITCH] -
+                              (stand[tilt::R_KNEE_PITCH] + 3.75f * kDeg)) < 1e-4f);
+
+    gait.update(state, 50);  // Enter DOUBLE at the same full effective lift.
+    q = gait.command().position_rad;
+    fb.apply(q, gait.command(), FeedbackContext::kStepping, gp.lift_deg);
+    EXPECT_TRUE(kT, gait.command().phase == Phase::kDouble);
+    EXPECT_TRUE(kT, std::fabs(q[tilt::R_KNEE_PITCH] -
+                              (stand[tilt::R_KNEE_PITCH] + 3.75f * kDeg)) < 1e-4f);
+
+    gait.update(state, 50);  // Halfway down: the complete effective fold halves.
+    q = gait.command().position_rad;
+    fb.apply(q, gait.command(), FeedbackContext::kStepping, gp.lift_deg);
+    EXPECT_TRUE(kT, std::fabs(q[tilt::R_KNEE_PITCH] -
+                              (stand[tilt::R_KNEE_PITCH] + 1.875f * kDeg)) < 1e-4f);
+}
+
+void testFeedbackFollowsCrossfade() {
+    constexpr char kT[] = "F13 lift feedback follows both crossfade legs";
+    Params gp = openLoop();
+    gp.lift_rise_ms = 100;
+    gp.lift_fall_ms = 100;
+    gp.open_crossfade = true;
+    FeedbackParams fp;
+    fp.ramp_steps = 3;
+    DcmStepping gait(gp);
+    GaitFeedback fb(fp);
+    DcmState state;
+    const JointArray stand = standPose();
+    gait.start();
+    gait.update(state, 300);  // L starts rising; first R lift starts descending.
+    EXPECT_TRUE(kT, gait.command().swing == Side::kLeft && gait.command().steps == 1);
+    gait.update(state, 50);   // Both trajectory scales are 0.5.
+    JointArray q = gait.command().position_rad;
+    fb.apply(q, gait.command(), FeedbackContext::kStepping, gp.lift_deg);
+    // R is swing index 0: 15 * 1/4 * 0.5 = 1.875 deg.
+    // L is swing index 1: 15 * 2/4 * 0.5 = 3.75 deg.
+    EXPECT_TRUE(kT, std::fabs(q[tilt::R_KNEE_PITCH] -
+                              (stand[tilt::R_KNEE_PITCH] + 1.875f * kDeg)) < 1e-4f);
+    EXPECT_TRUE(kT, std::fabs(q[tilt::L_KNEE_PITCH] -
+                              (stand[tilt::L_KNEE_PITCH] + 3.75f * kDeg)) < 1e-4f);
+}
+
 void testWarmStartFade() {
     constexpr char kT[] = "F8 learned lift is faded in on a new run";
     FeedbackParams p;
@@ -332,6 +391,8 @@ int main() {
     testPitchTrimSign();
     testAmplitude();
     testRampAndApply();
+    testFeedbackFollowsLandingTrajectory();
+    testFeedbackFollowsCrossfade();
     testDisabledAndFreeze();
     testDamping();
     testWarmStartFade();

@@ -231,7 +231,8 @@ float GaitFeedback::phaseDeg(Side side, float* amplitude_deg) const {
 }
 
 LiftHint GaitFeedback::liftHint(const Command& gait) const {
-    if (!params_.phase_sync_enabled || !gait.running || gait.phase != Phase::kDouble) {
+    if (!params_.phase_sync_enabled || !gait.running ||
+        (gait.phase != Phase::kSwing && gait.phase != Phase::kDouble)) {
         return LiftHint::kNone;
     }
     const Side next = opposite(gait.swing);
@@ -244,11 +245,22 @@ LiftHint GaitFeedback::liftHint(const Command& gait) const {
 }
 
 float GaitFeedback::extraLiftDeg(const Command& gait, float base_lift_deg) const {
-    if (gait.phase != Phase::kSwing) return 0.0f;
+    return extraLiftDegForSide(gait, gait.swing, base_lift_deg);
+}
+
+float GaitFeedback::extraLiftDegForSide(const Command& gait, Side side,
+                                        float base_lift_deg) const {
+    const int i = legIndex(side);
+    const bool lifting = gait.phase == Phase::kSwing && side == gait.swing;
+    const bool landing = !lifting && gait.lift_scale_by_leg[i] > 0.0f;
+    if (!lifting && !landing) return 0.0f;
+    // A touchdown/crossfade increments steps before lowering the previous leg,
+    // so keep using that leg's preceding swing index while it descends.
+    const std::uint32_t swing_index = landing && gait.steps > 0 ? gait.steps - 1 : gait.steps;
     float extra = 0.0f;
-    if (params_.ramp_steps > 0 && gait.steps < params_.ramp_steps) {
+    if (params_.ramp_steps > 0 && swing_index < params_.ramp_steps) {
         // Swing k (k = completed touchdowns) of the ramp: lift * (k+1)/(n+1).
-        const float scale = static_cast<float>(gait.steps + 1) /
+        const float scale = static_cast<float>(swing_index + 1) /
                             static_cast<float>(params_.ramp_steps + 1);
         extra = base_lift_deg * (scale - 1.0f);
     } else if (params_.amp_enabled) {
@@ -257,7 +269,7 @@ float GaitFeedback::extraLiftDeg(const Command& gait, float base_lift_deg) const
             fade = std::min(1.0f, static_cast<float>(state_.cycles) /
                                       static_cast<float>(params_.lift_fade_cycles));
         }
-        extra = fade * state_.lift_delta_deg[legIndex(gait.swing)];
+        extra = fade * state_.lift_delta_deg[i];
     }
     return std::max(extra, -base_lift_deg);
 }
@@ -276,9 +288,17 @@ void GaitFeedback::apply(JointArray& q, const Command& gait, FeedbackContext con
         q[leg * NUM_LEG_JOINTS + 0] += roll * DEG2RAD;   // Hip roll.
         q[leg * NUM_LEG_JOINTS + 1] += pitch * DEG2RAD;  // Hip pitch.
     }
-    if (stepping && gait.phase == Phase::kSwing) {
-        // Same fold as the pattern (DcmStepping): sole stays parallel.
-        addLift(q, gait.swing, extraLiftDeg(gait, base_lift_deg) * DEG2RAD, lift_mode);
+    if (stepping && (gait.phase == Phase::kSwing || gait.phase == Phase::kDouble)) {
+        // Scale each side independently: in an open-loop crossfade the new leg
+        // rises while the previous leg keeps its continuous landing correction.
+        for (const Side side : {Side::kLeft, Side::kRight}) {
+            const float lift_scale = gait.lift_scale_by_leg[legIndex(side)];
+            if (lift_scale <= 0.0f) continue;
+            addLift(q, side,
+                    extraLiftDegForSide(gait, side, base_lift_deg) *
+                        lift_scale * DEG2RAD,
+                    lift_mode);
+        }
     }
 }
 

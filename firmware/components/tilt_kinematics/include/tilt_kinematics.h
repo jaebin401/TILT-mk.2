@@ -7,14 +7,13 @@
 // Do not hand-edit link lengths here; regenerate the model instead.
 //
 // Ankle (2026-10-13): the URDF does not have the ankle joint yet. Until it is
-// regenerated, the ankle is modelled on top of the URDF's fixed foot:
+// regenerated, the ankle is modelled on top of the URDF leg chain:
 //   * axis parallel to the knee axis, on the calf CALF_LENGTH_MM from the knee
-//     (FOOT_LENGTH_MM above the URDF sole point), and
+//   * the sole reference is directly below that axis by FOOT_LENGTH_MM when the
+//     sole is flat, and
 //   * the foot rotates about it by ankle_pitch + (ANKLE_FIXED_RAD -
 //     model::SOLE_PITCH_AT_ZERO_RAD), so that ankle_pitch = 0 gives a sole that
-//     is flat when the leg is straight (tilt_config.h). With ankle_pitch =
-//     model::SOLE_PITCH_AT_ZERO_RAD - ANKLE_FIXED_RAD (-20 deg) the foot sits
-//     exactly where the old fixed bracket put it.
+//     is flat when the leg is straight (tilt_config.h).
 //   Link masses are the URDF ones (the ankle servo is not in the CoM yet).
 //
 // Frames and units
@@ -27,8 +26,8 @@
 //       hip_pitch +  leg swings backward
 //       knee_pitch + knee flexes
 //       ankle_pitch + toes down
-//   * The "sole" point is the URDF sole frame origin (under the calf, on the
-//     foot's bottom surface). Its frame has z up and x forward when the foot
+//   * The "sole" point is the foot-pad centre on its contact plane. Its frame
+//     has z up and x forward when the foot
 //     is flat (hip_pitch + knee_pitch + ankle_pitch = -ANKLE_FIXED_RAD = 0).
 
 #include "tilt_config.h"
@@ -85,6 +84,15 @@ float sole_pitch_rad(const float theta[NUM_LEG_JOINTS]);
 // (knee_pitch > ~2 deg). Out-of-reach targets are projected onto the
 // workspace boundary, the angles stay finite and reachable is false.
 IkResult ik_foot(Leg leg, const Vec3& sole_target, float sole_pitch = 0.0f);
+
+// Sagittal IK with hip roll and hip pitch held at caller-selected values.
+// Knee and ankle pitch are solved so the sole contact point reaches x/z;
+// sole orientation is intentionally left free. The hints select the closest
+// continuous two-link branch. `reachable` is false when the requested point
+// is outside the fixed-hip workspace or outside the fixed-roll plane.
+IkResult ik_foot_fixed_hip_pitch(Leg leg, const Vec3& sole_target,
+                                 float hip_roll, float hip_pitch,
+                                 float knee_hint, float ankle_hint);
 
 // Transforms a point given in a pose's local frame into B.
 Vec3 transform_point(const Pose& pose, const Vec3& local);

@@ -8,10 +8,13 @@ namespace tilt {
 
 inline constexpr float DEG2RAD = 0.01745329251994329577f; // inline constexpr는 뭐지?
 
-inline constexpr float THIGH_LENGTH_MM = 68.0f; 
-inline constexpr float CALF_LENGTH_MM = 69.408f;
-inline constexpr float FOOT_LENGTH_MM = 7.0f;
-inline constexpr float Y_HIP_MM = 13.0f;             // 몸통 중심 → H (hip roll·pitch 축 교차점)
+inline constexpr float THIGH_LENGTH_MM = 68.0f;
+inline constexpr float CALF_LENGTH_MM = 70.431f;  // Knee pitch axis -> ankle pitch axis.
+// Perpendicular distance from the ankle pitch axis to the foot-pad contact
+// plane. The temporary FK/IK model places its sole reference directly below
+// the ankle axis by this amount when the sole is flat.
+inline constexpr float FOOT_LENGTH_MM = 22.9f;
+inline constexpr float Y_HIP_MM = 13.0f;            // 몸통 중심 → H (hip roll·pitch 축 교차점)
 inline constexpr float HIP_LEG_OFFSET_Y_MM = 41.875f; // H → 다리 중심면 (왼다리 +, 오른다리 −)
 
 // Sole pitch relative to the torso when every leg pitch joint (hip, knee, ankle) is 0.
@@ -113,7 +116,9 @@ inline constexpr float ZERO_POSE_RAD[NUM_JOINTS] = {
     0.0f * DEG2RAD, -20.0f * DEG2RAD, +40.0f * DEG2RAD, -20.0f * DEG2RAD,
     0.0f * DEG2RAD, -20.0f * DEG2RAD, +40.0f * DEG2RAD, -20.0f * DEG2RAD,
 };
-inline constexpr float ZERO_POSE_HEIGHT_MM = 136.608f; // hip pitch 축 → 발바닥, zero pose CAD 실측
+// Hip-pitch axis -> sole contact plane at ZERO_POSE_RAD, derived from the
+// current 68 / 70.431 / 22.9 mm temporary kinematic model (L/R mean).
+inline constexpr float ZERO_POSE_HEIGHT_MM = 152.982f;
 
 // UART identifiers are integers here to avoid ESP headers in PC builds.
 inline constexpr int SERVO_UART_PORT = 1;

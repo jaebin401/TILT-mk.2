@@ -211,6 +211,78 @@ void testOpenLoop() {
     EXPECT_TRUE(kT, g.command().phase == Phase::kDouble);
     runFor(g, centred(), 10);  // period 200 ms
     EXPECT_TRUE(kT, g.command().phase == Phase::kSwing && g.command().swing == Side::kLeft);
+    EXPECT_TRUE(kT, g.command().steps == 1);
+}
+
+void testSynchronizedLiftTrajectory() {
+    constexpr char kT[] = "G11 synchronized pitch trajectory";
+    Params p;
+    p.mode = Mode::kOpenLoop;
+    p.lift_mode = LiftMode::kVertical;
+    p.lift_deg = 15.0f;
+    p.lift_rise_ms = 100;
+    p.lift_fall_ms = 100;
+    p.open_hold_ms = 150;
+    p.open_period_ms = 300;
+    p.open_crossfade = true;
+    DcmStepping g(p);
+    const JointArray stand = standPose();
+    g.start();
+
+    // No joint jumps at phase entry. All three pitch joints share the same
+    // quintic progress; at half time smoothstep5(0.5) is exactly 0.5.
+    EXPECT_TRUE(kT, std::fabs(g.command().lift_scale) < 1e-6f);
+    g.update(centred(), 50);
+    const JointArray& half = g.command().position_rad;
+    EXPECT_TRUE(kT, std::fabs(g.command().lift_scale - 0.5f) < 1e-5f);
+    EXPECT_TRUE(kT, std::fabs(half[tilt::R_HIP_PITCH] -
+                              (stand[tilt::R_HIP_PITCH] - rad(7.5f))) < 1e-5f);
+    EXPECT_TRUE(kT, std::fabs(half[tilt::R_KNEE_PITCH] -
+                              (stand[tilt::R_KNEE_PITCH] + rad(15.0f))) < 1e-5f);
+    EXPECT_TRUE(kT, std::fabs(half[tilt::R_ANKLE_PITCH] -
+                              (stand[tilt::R_ANKLE_PITCH] - rad(7.5f))) < 1e-5f);
+    EXPECT_TRUE(kT, std::fabs(half[tilt::R_HIP_PITCH] + half[tilt::R_KNEE_PITCH] +
+                              half[tilt::R_ANKLE_PITCH]) < 1e-5f);
+
+    g.update(centred(), 50);
+    EXPECT_TRUE(kT, std::fabs(g.command().lift_scale - 1.0f) < 1e-6f);
+    g.update(centred(), 200);  // At 300 ms: R starts landing while L starts rising.
+    EXPECT_TRUE(kT, g.command().phase == Phase::kSwing);
+    EXPECT_TRUE(kT, g.command().swing == Side::kLeft && g.command().steps == 1);
+    EXPECT_TRUE(kT, std::fabs(g.command().lift_scale_by_leg[0]) < 1e-6f);
+    EXPECT_TRUE(kT, std::fabs(g.command().lift_scale_by_leg[1] - 1.0f) < 1e-6f);
+
+    g.update(centred(), 50);  // Symmetric crossfade: both legs at half scale.
+    EXPECT_TRUE(kT, std::fabs(g.command().lift_scale_by_leg[0] - 0.5f) < 1e-5f);
+    EXPECT_TRUE(kT, std::fabs(g.command().lift_scale_by_leg[1] - 0.5f) < 1e-5f);
+    EXPECT_TRUE(kT, std::fabs(g.command().position_rad[tilt::L_KNEE_PITCH] -
+                              (stand[tilt::L_KNEE_PITCH] + rad(15.0f))) < 1e-5f);
+    EXPECT_TRUE(kT, std::fabs(g.command().position_rad[tilt::R_KNEE_PITCH] -
+                              (stand[tilt::R_KNEE_PITCH] + rad(15.0f))) < 1e-5f);
+
+    g.update(centred(), 50);
+    EXPECT_TRUE(kT, std::fabs(g.command().lift_scale_by_leg[0] - 1.0f) < 1e-6f);
+    EXPECT_TRUE(kT, std::fabs(g.command().lift_scale_by_leg[1]) < 1e-6f);
+}
+
+void testStepLimitWaitsForLanding() {
+    constexpr char kT[] = "G12 step limit waits for landing";
+    Params p;
+    p.mode = Mode::kOpenLoop;
+    p.max_steps = 1;
+    p.lift_rise_ms = 100;
+    p.lift_fall_ms = 100;
+    p.open_hold_ms = 100;
+    DcmStepping g(p);
+    g.start();
+    runFor(g, centred(), 100);
+    EXPECT_TRUE(kT, g.running() && g.command().phase == Phase::kDouble);
+    EXPECT_TRUE(kT, g.command().steps == 1 && std::fabs(g.command().lift_scale - 1.0f) < 1e-6f);
+    runFor(g, centred(), 50);
+    EXPECT_TRUE(kT, g.running() && std::fabs(g.command().lift_scale - 0.5f) < 1e-5f);
+    runFor(g, centred(), 50);
+    EXPECT_TRUE(kT, !g.running() && g.command().stop_reason == StopReason::kStepLimit);
+    EXPECT_TRUE(kT, std::fabs(g.command().lift_scale) < 1e-6f);
 }
 
 void testInsideDistance() {
@@ -263,6 +335,8 @@ int main() {
     testOuterEdgeAbort();
     testStepLimit();
     testOpenLoop();
+    testSynchronizedLiftTrajectory();
+    testStepLimitWaitsForLanding();
     testInsideDistance();
     testDoubleFallbackLift();
     testAutoFirstSwing();

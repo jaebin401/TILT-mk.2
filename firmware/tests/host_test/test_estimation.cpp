@@ -83,7 +83,9 @@ void testStaticStand() {
                 "soles y %.2f / %.2f mm\n", kTest, s.height_mm, s.omega_rad_s,
                 s.com_mm.x, s.com_mm.y, s.sole_mm[0].y, s.sole_mm[1].y);
     EXPECT_TRUE(kTest, s.valid);
-    EXPECT_TRUE(kTest, s.height_mm > 200.0f && s.height_mm < 225.0f);
+    // The measured 22.9 mm ankle-to-contact-plane offset raises the modelled
+    // torso/CoM by about 16 mm relative to the old fixed-foot model.
+    EXPECT_TRUE(kTest, s.height_mm > 220.0f && s.height_mm < 235.0f);
     EXPECT_NEAR(kTest, s.omega_rad_s, std::sqrt(9806.65f / s.height_mm), 1e-3f);
     EXPECT_NEAR(kTest, s.com_velocity_mm_s.y, 0.0f, 1e-3f);
     EXPECT_NEAR(kTest, s.dcm_mm[1], s.com_mm.y, 1e-3f);
